@@ -4,3 +4,7 @@ description: Durable non-blocking questions through existing Hermes gateway tran
 author: Denis Skripnik (web3blind)
 manifest_version: 1
 python_dependencies: []
+provides_tools: [deferred_questions]
+provides_hooks: [pre_gateway_dispatch]
+provides_middleware: []
+requires_env: []

@@ -199,6 +199,32 @@ credentials do not. Without a public VK checkout (or canonical installed `vk`
 plugin under the scratch home), cross-repository VK tests skip explicitly.
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
+The original regressions retain both legacy evicted-directory and conventional
+entrypoint fixtures. The actual public bridge has a separate real install smoke:
+commit the reviewed source, then run `scripts/verify_install.py` with a disposable
+venv **under TMPDIR**, never the live core Python. It clones the exact commit
+through loopback HTTPS using Git's smart HTTP backend and a temporary trusted CA,
+passes the real catalog/dependency/scanner/metadata path, builds and installs a
+wheel, compares installed bytes, and exercises two force reloads before Telegram
+readiness on both directory and entrypoint paths. Native sends are not invoked;
+only the adapter's manager-selection accessor is scoped to the test manager.
+
+```sh
+python3 -m venv "$TMPDIR/dq-install-venv"
+"$TMPDIR/dq-install-venv/bin/python" -m pip install \
+  'setuptools>=77,<84' 'wheel>=0.45,<0.47' \
+  'PyYAML>=6,<7' 'ruamel.yaml>=0.18,<0.19' 'packaging>=24,<27' \
+  'rich>=13,<15' 'python-dotenv>=1,<2' 'requests>=2,<3' \
+  'httpx>=0.28,<0.29' 'python-telegram-bot>=22,<23'
+"$TMPDIR/dq-install-venv/bin/python" scripts/verify_install.py
+```
+
+Git and `openssl` must be available. Scratch artifacts include a private test CA
+key, test config/database, cloned tree, wheel and external catalog metadata;
+keep them private and remove the disposable scratch environment when finished.
+This does not demonstrate public GitHub reachability before publication. No CI
+workflow is shipped without a real exercised CI result.
+
 Catalog admission is a separate human-reviewed upstream process. After committing
 and publishing a reviewed tree, obtain its full SHA and create an entry **outside
 this repository** following the current [catalog schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md)

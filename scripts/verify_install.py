@@ -10,7 +10,6 @@ The source must be committed; external catalog metadata pins that commit.
 """
 from __future__ import annotations
 import asyncio
-from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
 import importlib.metadata
@@ -31,12 +30,15 @@ assert os.environ.get('TMPDIR'), 'Set TMPDIR to an explicit scratch directory'
 # Refuse an installed Hermes environment; this test intentionally installs a wheel.
 assert not Path(sys.prefix).resolve().is_relative_to(CORE), 'Do not use the core venv'
 assert Path(sys.prefix).resolve().is_relative_to(Path(os.environ['TMPDIR']).resolve()), 'Disposable venv must be under TMPDIR'
+assert not any(d.metadata.get('Name', '').replace('_', '-').lower() == 'hermes-deferred-questions'
+               for d in importlib.metadata.distributions()), 'Use a fresh venv without this distribution'
 sandbox = Path(tempfile.mkdtemp(prefix='dq-install-', dir=os.environ['TMPDIR']))
 home = sandbox / 'home'
 home.mkdir()
 os.environ.update(HOME=str(home), HERMES_HOME=str(home / 'hermes'),
                   HERMES_BUNDLED_PLUGINS=str(sandbox / 'no-bundled-plugins'))
 sys.path.insert(0, str(CORE))
+os.environ['PYTHONPATH'] = str(CORE)
 
 def command(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
@@ -119,6 +121,10 @@ assert command('git', '-C', str(target), 'rev-parse', 'HEAD') == sha
 record = _read_install_metadata()[name]
 assert record['revision'] == sha and record['catalog']['sha'] == sha
 assert read_catalog_sidecar(target)['sha'] == sha
+from hermes_cli.plugin_validate import validate_plugin_dir
+validation = validate_plugin_dir(target)
+(sandbox / 'admission-report.json').write_text(json.dumps(validation.to_dict(), indent=2))
+assert validation.ok, validation.failures
 h = Path(os.environ['HERMES_HOME'])
 h.mkdir(exist_ok=True)
 h.joinpath('config.yaml').write_text('plugins:\n  enabled: [deferred-questions]\n')
