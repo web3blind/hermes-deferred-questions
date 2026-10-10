@@ -225,9 +225,12 @@ keep them private and remove the disposable scratch environment when finished.
 This does not demonstrate public GitHub reachability before publication. No CI
 workflow is shipped without a real exercised CI result.
 
-Catalog admission is a separate human-reviewed upstream process. After committing
-and publishing a reviewed tree, obtain its full SHA and create an entry **outside
-this repository** following the current [catalog schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md)
+Catalog admission is a separate human-reviewed upstream process. A ready-to-copy
+entry is provided in [catalog/deferred-questions.yaml](catalog/deferred-questions.yaml).
+It pins the tested plugin-source commit preceding that metadata-only addition,
+so the pin is not self-referential. Copy it into the upstream `plugin-catalog/`
+in a reviewed PR; publication of this repository does not imply admission.
+For future releases, obtain the full reviewed SHA and update the entry following the current [catalog schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md)
 and [submission guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission).
 Use `name: deferred-questions`, community tier, automation category, this public
 repository URL, that exact SHA, version `0.2.3`, maintainer `web3blind`, and declare
