@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68,<84"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-deferred-questions"
+version = "0.2.3"
+description = "Durable non-blocking questions through existing Hermes gateway transports"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "Denis Skripnik"}]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/web3blind/hermes-deferred-questions"
+Issues = "https://github.com/web3blind/hermes-deferred-questions/issues"
+
+[project.entry-points."hermes_agent.plugins"]
+deferred-questions = "hermes_deferred_questions"
+
+[tool.setuptools]
+packages = ["hermes_deferred_questions"]
+
+[tool.setuptools.package-data]
+hermes_deferred_questions = ["plugin.yaml"]
