@@ -27,14 +27,12 @@ def installed(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(home))
     target = home / 'plugins' / 'deferred-questions'
     target.mkdir(parents=True)
-    for name in ('plugin.yaml', '__init__.py'):
-        shutil.copy2(PROJECT / name, target / name)
-    shutil.copytree(PROJECT / 'hermes_deferred_questions', target / 'hermes_deferred_questions')
-    # Each fixture uses its own reviewed package; force reload within a fixture
-    # must preserve it, but unrelated fixture homes must not share source state.
-    for name in tuple(sys.modules):
-        if name == 'hermes_deferred_questions' or name.startswith('hermes_deferred_questions.'):
-            del sys.modules[name]
+    shutil.copy2(PROJECT / 'plugin.yaml', target / 'plugin.yaml')
+    # Preserve the legacy directory-loader regression surface (evicted modules).
+    # scripts/verify_install.py separately exercises the actual public bridge,
+    # stable package and real catalog clone/wheel in a disposable interpreter.
+    for name in ('__init__.py', 'store.py', 'runtime.py', 'lifecycle.py'):
+        shutil.copy2(PROJECT / 'hermes_deferred_questions' / name, target / name)
     home.joinpath('config.yaml').write_text('plugins:\n  enabled: [deferred-questions]\n  entries:\n    deferred-questions:\n      settings:\n        enable_tool: true\n')
     from hermes_cli.plugins import PluginManager
     manager = PluginManager(scope_key=str(home))

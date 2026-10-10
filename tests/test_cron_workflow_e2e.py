@@ -176,12 +176,6 @@ async def test_script_question_answer_real_agent_adaptive_effect(installed, tmp_
     adapter = telegram()
     bot = Bot('123456:ISOLATED-TEST-TOKEN')
     app = Application.builder().bot(bot).build()
-    # Control polling for every registration generation, including the real
-    # agent's independent PluginManager discovery. Stable package recovery can
-    # otherwise legitimately deliver the next row before the explicit barrier.
-    async def manual_worker(self, platform):
-        await asyncio.Event().wait()
-    monkeypatch.setattr(type(rt), 'worker', manual_worker)
     # Actual native handler factory binding; stop its polling task for explicit barriers.
     rt.wire('telegram', app, adapter)
     rt.workers['telegram'].cancel()

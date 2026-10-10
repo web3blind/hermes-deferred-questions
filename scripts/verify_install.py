@@ -11,7 +11,7 @@ The source must be committed; external catalog metadata pins that commit.
 from __future__ import annotations
 import asyncio
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
 import importlib.metadata
 import json
@@ -53,10 +53,38 @@ cert, key = sandbox / 'cert.pem', sandbox / 'key.pem'
 command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
         '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1',
         '-keyout', str(key), '-out', str(cert))
-class QuietHandler(SimpleHTTPRequestHandler):
-    def log_message(self, *args):
+class QuietHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
         pass
-server = ThreadingHTTPServer(('127.0.0.1', 0), partial(QuietHandler, directory=str(served)))
+    def do_GET(self):
+        self.backend()
+    def do_POST(self):
+        self.backend()
+    def backend(self):
+        from urllib.parse import urlsplit
+        url = urlsplit(self.path)
+        length = int(self.headers.get('Content-Length', '0'))
+        body = self.rfile.read(length) if length else b''
+        env = dict(PATH=os.environ['PATH'], HOME=str(home),
+                   GIT_PROJECT_ROOT=str(served), GIT_HTTP_EXPORT_ALL='1',
+                   PATH_INFO=url.path, QUERY_STRING=url.query,
+                   REQUEST_METHOD=self.command, CONTENT_TYPE=self.headers.get('Content-Type', ''),
+                   CONTENT_LENGTH=str(length), REMOTE_USER='', REMOTE_ADDR='127.0.0.1',
+                   SERVER_PROTOCOL='HTTP/1.1', SERVER_NAME='127.0.0.1')
+        result = subprocess.run(['git', 'http-backend'], input=body, env=env,
+                                capture_output=True, check=True)
+        headers, payload = result.stdout.split(b'\r\n\r\n', 1)
+        lines = headers.decode().split('\r\n')
+        status = next((int(l.split(':', 1)[1].split()[0]) for l in lines if l.lower().startswith('status:')), 200)
+        self.send_response(status)
+        for line in lines:
+            key, value = line.split(':', 1)
+            if key.lower() != 'status':
+                self.send_header(key, value.strip())
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+server = ThreadingHTTPServer(('127.0.0.1', 0), QuietHandler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(cert, key)
 server.socket = context.wrap_socket(server.socket, server_side=True)
