@@ -37,7 +37,7 @@ home = sandbox / 'home'
 home.mkdir()
 os.environ.update(HOME=str(home), HERMES_HOME=str(home / 'hermes'),
                   HERMES_BUNDLED_PLUGINS=str(sandbox / 'no-bundled-plugins'))
-sys.path.insert(0, str(CORE))
+sys.path.append(str(CORE))
 os.environ['PYTHONPATH'] = str(CORE)
 
 def command(*args, **kwargs):
@@ -95,23 +95,22 @@ thread.start()
 os.environ['GIT_SSL_CAINFO'] = str(cert)
 from hermes_cli.plugin_catalog import load_catalog
 from hermes_cli.plugins_cmd_catalog import install_catalog_entry, read_catalog_sidecar
-from hermes_cli.plugins_cmd import _install_python_dependencies, _read_install_metadata, _console
+from hermes_cli.plugins_cmd import _read_install_metadata
 from hermes_cli.plugins import PluginManager
 catalog_dir = sandbox / 'catalog'
 catalog_dir.mkdir()
 repo = f'https://127.0.0.1:{server.server_port}/plugin.git'
 # JSON is YAML-compatible; stays outside the pinned source tree.
-entry_data = dict(name='deferred-questions', repo=repo, sha=sha,
-                  description='Durable non-blocking questions', maintainer='web3blind',
-                  tier='community', category='automation', version='0.2.3', readme=True,
-                  capabilities=dict(provides_tools=['deferred_questions'],
-                                    provides_hooks=['pre_gateway_dispatch'],
-                                    provides_middleware=[], requires_env=[]))
+source_entry, = load_catalog(ROOT / 'catalog')
+entry_data = source_entry.to_dict()
+entry_data.update(repo=repo, sha=sha)
 (catalog_dir / 'deferred-questions.yaml').write_text(json.dumps(entry_data))
 entry, = load_catalog(catalog_dir)
 try:
     target, manifest, name = install_catalog_entry(entry, force=False)
-    _install_python_dependencies(target, _console())
+    # No third-party runtime dependencies are declared. Do not rely on the
+    # removed private dependency installer in supported Hermes releases.
+    assert manifest.get('python_dependencies', []) == []
 finally:
     server.shutdown()
     server.server_close()

@@ -1,8 +1,10 @@
 name: deferred-questions
-version: "0.2.3"
+version: "0.2.4"
 description: Durable non-blocking questions through existing Hermes gateway transports.
 author: Denis Skripnik (web3blind)
 manifest_version: 1
+requires_hermes: ">=0.21.6"
+platforms: [linux, macos]
 python_dependencies: []
 provides_tools: [deferred_questions]
 provides_hooks: [pre_gateway_dispatch]

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 
 

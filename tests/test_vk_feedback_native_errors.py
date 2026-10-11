@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import runtime, ControlledAdapter
 from test_answer_feedback import answered
 

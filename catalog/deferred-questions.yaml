@@ -7,7 +7,9 @@ description: Durable non-blocking questions with exact answer binding and gatewa
 maintainer: web3blind
 tier: community
 category: automation
-version: "0.2.3"
+requires_hermes: ">=0.21.6"
+platforms: [linux, macos]
+version: "0.2.4"
 docs_url: https://github.com/web3blind/hermes-deferred-questions#readme
 readme: true
 capabilities:

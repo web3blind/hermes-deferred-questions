@@ -10,5 +10,5 @@ import sys
 
 _package_root = str(Path(__file__).resolve().parent)
 if _package_root not in sys.path:
-    sys.path.insert(0, _package_root)
+    sys.path.append(_package_root)
 from hermes_deferred_questions import register, configure_parser, runtime, store, lifecycle

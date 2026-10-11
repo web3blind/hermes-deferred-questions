@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 
 
@@ -33,7 +33,7 @@ async def test_real_admission_once_after_store_reopen(installed):
     await rt.dispatch_answers_once('signal')
     assert len(seen) == 1
     event = seen[0]
-    assert 'Ответ: Bus' in event.text and 'Which route today?' in event.text
+    assert 'Answer: Bus' in event.text and 'Which route today?' in event.text
     assert event.source.chat_id == '123' and event.source.user_id == '456'
     assert event.internal is True and event.allow_gateway_control is False
     assert event.metadata['deferred_question_id'] == row['id']

@@ -65,7 +65,7 @@ async def test_public_adapter_message_event_callback(installed, monkeypatch, pub
     acknowledgments = [params for name, params in h.calls if name == 'messages.sendMessageEventAnswer']
     assert len(acknowledgments) == 1
     assert acknowledgments[0]['event_id'] == obj['event_id']
-    assert json.loads(acknowledgments[0]['event_data'])['text'] == 'Ответ сохранён'
+    assert json.loads(acknowledgments[0]['event_data'])['text'] == 'Answer saved'
     assert not h.seen and not h.forwarded
 
 

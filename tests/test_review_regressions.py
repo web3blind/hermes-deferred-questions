@@ -73,7 +73,7 @@ async def test_forum_real_decode_text_and_old_button_after_restart(installed, mo
                 'message': payload, 'data': f"dq:{button_row['id']}:2"}}, bot)
             with patch.object(Bot, 'answer_callback_query', new=AsyncMock()) as ack:
                 await handler.handle_update(update, app2, handler.check_update(update), NS())
-                assert ack.call_args.kwargs['text'] == ('wrong_route' if thread == 8 else 'Ответ сохранён')
+                assert ack.call_args.kwargs['text'] == ('wrong_route' if thread == 8 else 'Answer saved')
         assert rt2.store.get(button_row['id'])['answer']['value'] == 'Bus'
     finally:
         second.unload(); await asyncio.sleep(0)

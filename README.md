@@ -7,10 +7,12 @@ No second bot connection, blocking answer waiter, cron patch or core patch is ad
 
 ## Requirements and verification scope
 
-- Python 3.11+ and Hermes with current PluginContext tool/CLI/hook registration,
-  native platform handlers, unload callbacks, gateway plugin rewire, profile-aware
-  authorization and canonical routing identity APIs. Older Hermes releases without
-  those APIs are unsupported; no unverified minimum Hermes version is claimed.
+- Python 3.11+ and **Hermes >=0.21.6**, which introduced the gateway APIs used
+  here: platform handler registration, unload callbacks, internal-event admission
+  and canonical routing identity.
+- Supported operating systems: **Linux and macOS** (`platforms: [linux, macos]`).
+  Feedback serialization requires POSIX `fcntl.flock`; **Windows is unsupported**.
+  Verification reported here runs on Linux, not macOS or Windows.
 - The selected platform's normal Hermes dependencies and credentials. This plugin
   adds no third-party Python runtime dependencies; `dependencies` and manifest
   `python_dependencies` are empty. Hermes's Git installer resolves declared
@@ -121,6 +123,12 @@ the complete list and original labels remain in the stored snapshot.
 - Telegram and VK answer/expiry/cancellation feedback uses a durable edit outbox.
   Failed edits do not erase accepted answers. Transient edits have bounded backoff;
   uncertain/deleted/permanent outcomes are held or marked deleted, not resent.
+  Per-question feedback locks are removed only after durable `done`, while still
+  locked. A single persistent `feedback.lock` admission guard serializes lock
+  opening and terminal unlinking across processes, preventing split-inode races.
+  Retryable, interrupted and held feedback retains its per-question lock.
+  Stop old gateway processes before upgrading: versions without this admission
+  guard must not share the feedback ledger concurrently with the new lock protocol.
 - Gateway absent/disconnected/unauthorized: questions remain queued or expire.
   Gateway and sender must share the same profile home. Borrowing another profile's
   bot is not silently supported.
@@ -233,10 +241,12 @@ in a reviewed PR; publication of this repository does not imply admission.
 For future releases, obtain the full reviewed SHA and update the entry following the current [catalog schema](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md)
 and [submission guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/catalog-submission).
 Use `name: deferred-questions`, community tier, automation category, this public
-repository URL, that exact SHA, version `0.2.3`, maintainer `web3blind`, and declare
+repository URL, that exact SHA, version `0.2.4`, maintainer `web3blind`, and declare
 `provides_tools: [deferred_questions]`, `provides_hooks: [pre_gateway_dispatch]`,
-empty `provides_middleware` and `requires_env`. Do not invent a minimum Hermes
-version or put a self-referential SHA pin inside the pinned tree. Catalog install
+empty `provides_middleware` and `requires_env`, `requires_hermes: ">=0.21.6"` and
+`platforms: [linux, macos]`. Do not put a self-referential SHA pin inside the pinned
+tree. The current catalog SHA still identifies the previously reviewed source,
+not these uncommitted changes; update it only after a new commit is reviewed. Catalog install
 must prove real clone/discovery/force-reload readiness; catalog visibility alone
 is not dependency or lifecycle verification.
 

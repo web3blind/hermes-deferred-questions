@@ -19,6 +19,6 @@ def pytest_addoption(parser):
     parser.addoption('--dq-core-root')
     parser.addoption('--dq-vk-plugin-root')
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import installed  # noqa: F401, E402
 from test_entrypoint_lifecycle import ep  # noqa: F401, E402

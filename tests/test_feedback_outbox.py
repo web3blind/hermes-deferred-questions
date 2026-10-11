@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 from test_answer_feedback import answered
 
@@ -31,6 +31,7 @@ async def test_reopened_worker_retries_same_message_and_stops_after_ack(installe
     intent = rt.store.feedback(qid)
     assert intent['state'] == 'pending' and intent['diagnostic'] == 'edit_timeout'
     assert intent['attempts'] == 1
+    assert rt.store.path.with_name(f'feedback-{qid}.lock').exists()
     assert rt.store.pending_feedback('telegram') == []
     rt.store = type(rt.store)(rt.store.home, rt.store.profile)
     with rt.store.connect() as db:
@@ -38,7 +39,9 @@ async def test_reopened_worker_retries_same_message_and_stops_after_ack(installe
     await rt.dispatch_feedback_once('telegram')
     await rt.dispatch_feedback_once('telegram')
     assert rt.store.feedback(qid)['state'] == 'done'
+    assert not rt.store.path.with_name(f'feedback-{qid}.lock').exists()
     assert bot.edit_message_text.call_count == 2
+    assert not rt.store.path.with_name(f'feedback-{qid}.lock').exists()
     assert {c.kwargs['message_id'] for c in bot.edit_message_text.call_args_list} == {42}
 
 
@@ -55,6 +58,7 @@ async def test_vk_native_helper_envelope_ack(installed, monkeypatch):
     rt.adapters['vk'] = (None, adapter)
     assert await rt.answer_feedback(qid)
     assert rt.store.feedback(qid)['state'] == 'done'
+    assert not rt.store.path.with_name(f'feedback-{qid}.lock').exists()
     assert wire.call_args.args[0].endswith('/messages.edit')
 
 
@@ -70,7 +74,7 @@ async def test_telegram_utf16_budget_preserves_full_answer(installed):
     assert await rt.answer_feedback(row['id'])
     text = bot.edit_message_text.call_args.kwargs['text']
     assert len(text.encode('utf-16-le')) // 2 <= 4096
-    assert 'Ответ сохранён:' in text and text.endswith('…')
+    assert 'Answer saved:' in text and text.endswith('…')
     assert rt.store.get(row['id'])['answer']['value'] == value
 
 
@@ -123,6 +127,7 @@ async def test_edit_outcomes_are_safe_and_never_resend(installed, outcome, expec
     await rt.dispatch_feedback_once('telegram')
     intent = rt.store.feedback(qid)
     assert intent['state'] == expected and intent['diagnostic'] == code
+    assert rt.store.path.with_name(f'feedback-{qid}.lock').exists() is (expected != 'done')
     assert 'SECRET' not in str(intent)
     assert rt.store.get(qid)['state'] == 'answered'
     await rt.dispatch_feedback_once('telegram')
@@ -145,10 +150,15 @@ async def test_concurrent_reopened_runtimes_serialize_one_edit(installed):
     other.adapters['telegram'] = binding
     task = asyncio.create_task(rt.answer_feedback(qid))
     await entered.wait()
+    lock_path = rt.store.path.with_name(f'feedback-{qid}.lock')
+    inode = lock_path.stat().st_ino
     assert not await other.answer_feedback(qid)
+    assert lock_path.stat().st_ino == inode
     release.set()
     assert await task
+    assert not lock_path.exists()
     assert await other.answer_feedback(qid)
+    assert not lock_path.exists()
     assert bot.edit_message_text.call_count == 1
 
 
@@ -168,6 +178,8 @@ async def test_cancel_inflight_edit_reopens_as_retryable(installed):
         await task
     rt.store = type(rt.store)(rt.store.home, rt.store.profile)
     assert rt.store.feedback(qid)['state'] == 'pending'
+    assert rt.store.path.with_name(f'feedback-{qid}.lock').exists()
     bot.edit_message_text.side_effect = None
     assert await rt.answer_feedback(qid)
     assert rt.store.feedback(qid)['state'] == 'done'
+    assert not rt.store.path.with_name(f'feedback-{qid}.lock').exists()

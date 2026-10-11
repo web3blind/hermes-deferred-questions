@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import logging
@@ -418,10 +419,10 @@ class Runtime:
         if row['state'] == 'answered':
             answer = row['answer']
             label = (f"{answer['index']}. " if answer['kind'] == 'option' else '') + answer['value']
-            text = row['request']['question'] + '\n\nОтвет сохранён: ' + label
+            text = row['request']['question'] + '\n\nAnswer saved: ' + label
         else:
             text = row['request']['question'] + '\n\n' + (
-                'Вопрос отменён.' if row['state'] == 'cancelled' else 'Срок ответа истёк.')
+                'Question cancelled.' if row['state'] == 'cancelled' else 'The answer deadline has expired.')
         if row['request']['platform'] == 'telegram' and len(text.encode('utf-16-le')) // 2 > 4096:
             text = text.encode('utf-16-le')[:4095 * 2].decode('utf-16-le', errors='ignore') + '…'
         return text
@@ -451,20 +452,91 @@ class Runtime:
             current = current.__cause__
         return False
 
+    @contextmanager
+    def _feedback_lock(self, qid):
+        """Fence open/flock/unlink with one stable, never-unlinked admission inode.
+
+        A per-question lock cannot simply be unlinked: another process may have
+        opened its old inode while a third opens the replacement. Admission holds
+        this guard until the nonblocking question flock succeeds or its FD closes.
+        Cleanup holds both locks and runs only after a durable done receipt. The
+        guard is never held across transport IO; pending/cancelled attempts keep
+        the question inode so retries still serialize with in-flight finalizers.
+        """
+        import fcntl
+        path = self.store.path.with_name(f'feedback-{qid}.lock')
+        guard_path = self.store.path.with_name('feedback.lock')
+        lock = None
+        acquired = False
+
+        def release(fd):
+            # Independent attempts: failed unlock must not prevent close, and
+            # cleanup OSError must not replace a result or CancelledError.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                log.warning('Deferred feedback lock unlock failed')
+            try:
+                fd.close()
+            except OSError:
+                log.warning('Deferred feedback lock close failed')
+
+        try:
+            guard = guard_path.open('a')
+            try:
+                try:
+                    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass  # No question FD may be opened while admission is busy.
+                else:
+                    lock = path.open('a')  # Outer finally owns it immediately.
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        acquired = True
+                    finally:
+                        if not acquired:
+                            release(lock)  # No old-inode waiter escapes admission.
+                            lock = None
+            finally:
+                release(guard)  # Never retain the admission FD across an await.
+            yield acquired
+        finally:
+            if lock is not None:
+                guard = None
+                try:
+                    guard = guard_path.open('a')
+                    try:
+                        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass  # Preserve the path; never wait on another process.
+                    else:
+                        intent = self.store.feedback(qid)
+                        if intent is not None and intent['state'] == 'done':
+                            path.unlink(missing_ok=True)
+                except Exception:
+                    # A duplicate callback may retry retained done-path cleanup.
+                    log.warning('Deferred feedback lock cleanup failed')
+                finally:
+                    # On successful unlink, release the old inode before guard.
+                    # Also attempt both resources after any read/unlink failure.
+                    release(lock)
+                    if guard is not None:
+                        release(guard)
+
     async def answer_feedback(self, qid):
         """Versioned edit only. OS lock serializes local generations/processes.
 
         No DB transaction spans IO; crash releases lock, leaving intent retryable.
         """
-        import fcntl
         import time
         row = self.store.get(qid)
         if not self.live or not row:
             return False
-        with self.store.path.with_name(f'feedback-{qid}.lock').open('a') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+        with self._feedback_lock(qid) as acquired:
+            if not acquired:
                 return False
             intent = self.store.feedback(qid)
             if intent is None:
@@ -690,12 +762,12 @@ class Runtime:
             if not key or not self.store.claim_action(row['id']):
                 continue
             answer = row['answer']
-            text = ('Ответ пользователя на отложенный вопрос.\n'
-                    + 'Вопрос: ' + r['question'] + '\n'
-                    + 'Ответ: ' + answer['value'] + '\n'
-                    + 'Продолжи текущую задачу с учётом этого ответа и правил соответствующего скилла. '
-                    + 'Если требуется следующий этап, подготовь его вопрос с актуальными вариантами. '
-                    + 'Не повторяй уже подтверждённые этапы.')
+            text = ('User answer to a deferred question.\n'
+                    + 'Question: ' + r['question'] + '\n'
+                    + 'Answer: ' + answer['value'] + '\n'
+                    + 'Continue the current task using this answer and the relevant skill rules. '
+                    + 'If another stage is needed, prepare its question with current options. '
+                    + 'Do not repeat stages that have already been confirmed.')
             event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source,
                                  internal=True, allow_gateway_control=False,
                                  metadata={'gateway_session_key': key, 'deferred_question_id': row['id']})
@@ -841,8 +913,8 @@ class Runtime:
             return None
         if result in ('answered', 'already_answered'):
             self._spawn(self.answer_feedback(TOKEN.fullmatch(supplied[0])[1]), 'vk')
-            return 'Ответ сохранён'
-        return 'Ответ не принят'
+            return 'Answer saved'
+        return 'Answer not accepted'
 
     def vk_callback_capability(self, adapter, row, buttons):
         if not callable(getattr(adapter, 'register_callback_handler', None)):
@@ -980,11 +1052,11 @@ class Runtime:
             text = '\n'.join([r['question'], '', *[
                 f'{i}. {option}' for i, option in enumerate(r['options'], 1)]])
             if labels:
-                text += '\n\nВыберите вариант кнопкой ниже.'
+                text += '\n\nChoose an option using a button below.'
                 if prefix is not None:
-                    text += f'\nТекстовый ответ: {prefix}dq {row["id"]} НОМЕР'
+                    text += f'\nText answer: {prefix}dq {row["id"]} NUMBER'
                     if r['allow_text']:
-                        text += f'\nСвой ответ: {prefix}dq {row["id"]} text: ВАШ ОТВЕТ'
+                        text += f'\nCustom answer: {prefix}dq {row["id"]} text: YOUR ANSWER'
             args = {'peer_ids': r['chat_id'], 'message': text, 'random_id': -row['delivery_nonce']}
             if not 0 < row['delivery_nonce'] <= 2_147_483_647:
                 raise RuntimeError('VK delivery sequence exhausted')
@@ -998,25 +1070,25 @@ class Runtime:
             else:
                 log.warning('Deferred VK buttons unavailable: %s', reason)
                 # Do not advertise bare dq as addressed or root replies as lane overrides.
-                instruction = (f'Ответ без кнопок ({reason}; текст: {text_reason}). '
-                               'Завершите создание/редактирование проекта перед ответом.\n')
-                answer_form = 'НОМЕР' if r['options'] else 'text: ВАШ ОТВЕТ'
+                instruction = (f'Answer without buttons ({reason}; text: {text_reason}). '
+                               'Finish creating/editing the project before answering.\n')
+                answer_form = 'NUMBER' if r['options'] else 'text: YOUR ANSWER'
                 if r['thread_id'] and prefix:
-                    instruction += (f'Отправьте: {prefix}dq {row["id"]} {answer_form}\n'
-                                    'Или ответьте именно на это сообщение: '
-                                    f'dq {row["id"]} {answer_form} (привязка проекта должна быть сохранена).')
+                    instruction += (f'Send: {prefix}dq {row["id"]} {answer_form}\n'
+                                    'Or reply to this exact message: '
+                                    f'dq {row["id"]} {answer_form} (the project binding must be preserved).')
                 elif text_reason == 'root-with-projects':
-                    instruction += ('Автоматический адресованный ответ в корневой чат недоступен '
+                    instruction += ('Automatically addressed replies to the root chat are unavailable '
                                     '(root-with-projects) '
-                                    'при проектах: host не поддерживает явный выбор root. '
-                                    'Не отвечайте из другого проекта; требуется проверка маршрута оператором.')
+                                    'with projects: the host does not support explicit root selection. '
+                                    'Do not answer from another project; an operator must verify the route.')
                 elif prefix is not None:
-                    instruction += f'Отправьте: {prefix}dq {row["id"]} {answer_form}'
+                    instruction += f'Send: {prefix}dq {row["id"]} {answer_form}'
                 else:
-                    instruction += ('Нет проверенного адресования: требуется исправление конфигурации '
-                                    'сообщества/проекта оператором, а не ответ из другого проекта.')
+                    instruction += ('No verified addressing: an operator must correct the '
+                                    'community/project configuration; do not answer from another project.')
                 if prefix is not None and r['options'] and r['allow_text']:
-                    instruction += f'\nСвой ответ: {prefix}dq {row["id"]} text: ВАШ ОТВЕТ'
+                    instruction += f'\nCustom answer: {prefix}dq {row["id"]} text: YOUR ANSWER'
                 args['message'] = text + '\n\n' + instruction
             result = await adapter._vk_method('messages.send', args)
             message_id = adapter._sent_message_id(result)
@@ -1087,7 +1159,7 @@ class Runtime:
                                  chat_type=decoded.chat_type, thread_id=decoded.thread_id,
                                  is_bot=bool(query.from_user.is_bot))
             result = self.callback(adapter, query.data, source, message.message_id)
-            await query.answer('Ответ сохранён' if result in ('answered', 'already_answered') else result)
+            await query.answer('Answer saved' if result in ('answered', 'already_answered') else result)
             if result in ('answered', 'already_answered'):
                 match = TOKEN.fullmatch(query.data)
                 if match is not None:

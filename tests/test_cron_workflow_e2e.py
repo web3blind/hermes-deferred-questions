@@ -116,14 +116,14 @@ def run_real_agent(event, stages):
         if receipts and receipts[-1]['tool_call_id'] != 'describe-cron':
             assert json.loads(receipts[-1]['content']).get('success') is True, receipts
             return completion('Next stage scheduled.')
-        if '\nОтвет: Finish\n' in text:
+        if '\nAnswer: Finish\n' in text:
             return completion('Workflow complete; no next cron.')
         if not receipts:
             return completion(None, [NS(id='describe-cron', type='function', function=NS(
                 name='tool_describe', arguments=json.dumps({'names': ['cronjob_manage']})))])
         assert 'cronjob_manage' in receipts[-1]['content']
-        option, schedule, question = ('Walk', '30m', 'Walking distance?') if '\nОтвет: Walk\n' in text else ('Bus', '2h', 'Bus line?')
-        assert f'\nОтвет: {option}\n' in text
+        option, schedule, question = ('Walk', '30m', 'Walking distance?') if '\nAnswer: Walk\n' in text else ('Bus', '2h', 'Bus line?')
+        assert f'\nAnswer: {option}\n' in text
         arguments = dict(action='create', name='adaptive-next', schedule=schedule,
                          script=stages[option].name, no_agent=True,
                          repeat=1, deliver='local')

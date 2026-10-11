@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import ControlledAdapter, runtime
 
 

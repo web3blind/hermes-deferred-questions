@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.4
+
+- Require Hermes >=0.21.6 and declare Linux/macOS support.
+- Use English feedback, callback instructions and continuation messages while
+  preserving the user's original question, labels and answer text.
+- Remove completed per-question feedback locks through a stable, nonblocking
+  admission guard; preserve retry/cancellation safety across processes.
+- Append the directory-plugin path without overriding existing import priority.
+- Add real cross-process contention, cancellation, unload and cleanup-failure
+  regressions. Stop older gateway processes before upgrading the lock protocol.
+
 ## 0.2.3
 
 - Public distribution with a conventional Python package, wheel entrypoint and

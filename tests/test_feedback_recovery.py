@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 from test_answer_feedback import answered
 
@@ -55,7 +55,7 @@ async def test_cleanup_edits_status_and_removes_keyboard(installed, terminal):
     await rt.dispatch_feedback_once('telegram')
     assert bot.edit_message_text.call_args.kwargs['reply_markup'] is None
     assert bot.edit_message_text.call_args.kwargs['text'].endswith(
-        'Вопрос отменён.' if terminal == 'cancelled' else 'Срок ответа истёк.')
+        'Question cancelled.' if terminal == 'cancelled' else 'The answer deadline has expired.')
     assert rt.store.feedback(row['id'])['state'] == 'done'
 
 

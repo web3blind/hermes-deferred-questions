@@ -100,7 +100,7 @@ async def test_addressed_buttons_real_invocation_original_lane(installed, monkey
     args = sent_args(h)
     assert 'keyboard' not in args  # old adapter: never emit newly addressed text buttons
     prefix = ('@club99 ' if int(peer) >= 2000000000 else '') + ('@a ' if thread else '')
-    action = {'label': prefix + 'Ответ: Bus', 'payload': json.dumps(
+    action = {'label': prefix + 'Answer: Bus', 'payload': json.dumps(
         {'hermes_deferred_question': f"dq:{row['id']}:2"})}
     assert args['random_id'] == -row['delivery_nonce']
     await intake(h, action['label'], action['payload'])
@@ -127,7 +127,7 @@ async def test_pending_project_capability_and_late_route_rejection(installed, mo
     h = await harness(installed, monkeypatch)
     row = new_question(h)
     await h.rt.dispatch_once('vk')
-    action = {'label': '@club99 @a Ответ: Bus', 'payload': json.dumps(
+    action = {'label': '@club99 @a Answer: Bus', 'payload': json.dumps(
         {'hermes_deferred_question': f"dq:{row['id']}:2"})}
     h.adapter._lane_state[pending][h.adapter._state_key(h.peer, '456')] = {
         'lane_id': 'b', 'expires_at': time.time() + 3600}
@@ -155,7 +155,7 @@ async def test_root_with_active_project_is_explicit_unsupported_fallback(install
     await h.rt.dispatch_once('vk')
     args = sent_args(h)
     assert 'keyboard' not in args and 'root-with-projects' in args['message']
-    assert 'явный выбор root' in args['message']
+    assert 'explicit root selection' in args['message']
     # Even a reply to bot's root prompt does not override active project B.
     await intake(h, f"dq {row['id']} 2", reply={
         'from_id': -99, 'conversation_message_id': 42, 'text': args['message']})
@@ -175,7 +175,7 @@ async def test_fallback_native_text_and_reply_original_lane(installed, monkeypat
     await h.rt.dispatch_once('vk')
     args = sent_args(h)
     assert 'keyboard' not in args
-    assert f"@club99 @a dq {row['id']} НОМЕР" in args['message']
+    assert f"@club99 @a dq {row['id']} NUMBER" in args['message']
     await h.adapter._set_active_lane_id(h.peer, '456', 'b')
     if mode == 'pending':
         # A reply to the remembered lane takes precedence over pending edit B.
@@ -197,7 +197,7 @@ async def test_owned_tokens_fail_closed_after_native_intake(installed, monkeypat
     actor = '789' if case == 'wrong-actor' else ('888' if case == 'acl-denied' else '456')
     if case == 'gateway-denied':
         h.gateway._is_user_authorized_for_source = lambda source: False
-    label = '@club99 @b Ответ: Bus' if case == 'wrong-route' else '@club99 @a Ответ: Bus'
+    label = '@club99 @b Answer: Bus' if case == 'wrong-route' else '@club99 @a Answer: Bus'
     await intake(h, label, json.dumps({'hermes_deferred_question': f'dq:{qid}:2'}), actor)
     assert not h.rt.store.get(row['id'])['answer']
     assert not h.forwarded
@@ -219,7 +219,7 @@ async def test_saved_addressed_button_after_controlled_reload(installed, monkeyp
     h = await harness(installed, monkeypatch)
     row = new_question(h)
     await h.rt.dispatch_once('vk')
-    action = {'label': '@club99 @a Ответ: Bus', 'payload': json.dumps(
+    action = {'label': '@club99 @a Answer: Bus', 'payload': json.dumps(
         {'hermes_deferred_question': f"dq:{row['id']}:2"})}
     installed[0].discover_and_load(force=True)
     new = await harness(installed, monkeypatch)
@@ -274,8 +274,8 @@ async def test_no_options_text_fallback_uses_real_lane_intake(installed, monkeyp
     await h.rt.dispatch_once('vk')
     args = sent_args(h)
     assert 'keyboard' not in args
-    assert f"@club99 @a dq {row['id']} text: ВАШ ОТВЕТ" in args['message']
-    assert 'НОМЕР' not in args['message']
+    assert f"@club99 @a dq {row['id']} text: YOUR ANSWER" in args['message']
+    assert 'NUMBER' not in args['message']
     await h.adapter._set_active_lane_id(h.peer, '456', 'b')
     await intake(h, f"@club99 @a dq {row['id']} text: My own route")
     assert not h.forwarded and h.rt.store.get(row['id'])['answer']['value'] == 'My own route'

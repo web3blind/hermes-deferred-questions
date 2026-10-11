@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 
 
@@ -79,7 +79,7 @@ async def test_vk_legacy_text_button_intake_remains_durable(installed, monkeypat
     assert 'keyboard' not in params
     assert params['random_id'] == -row['delivery_nonce']
     # Intake compatibility for a text-action button delivered by older versions.
-    await intake(h, '@club99 Ответ: Bus', json.dumps(
+    await intake(h, '@club99 Answer: Bus', json.dumps(
         {'hermes_deferred_question': f"dq:{row['id']}:2"}))
     assert not h.forwarded and h.rt.store.get(row['id'])['answer']['value'] == 'Bus'
 

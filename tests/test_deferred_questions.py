@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 CORE = Path(os.environ['HERMES_CORE_ROOT']).resolve()
-sys.path.insert(0, str(CORE))
+sys.path.append(str(CORE))
 PROJECT = Path(__file__).resolve().parents[1]
 
 

@@ -49,7 +49,7 @@ async def test_original_label_callback_receipt_lane_feedback(installed, monkeypa
     action = json.loads(sent_args(h)['keyboard'])['buttons'][0][1]['action']
     assert action == {'type': 'callback', 'label': 'Bus', 'payload': json.dumps(
         {'hermes_callback': 'deferred_questions', 'data': {'token': f"dq:{row['id']}:2"}})}
-    assert await click(h, event(row)) == 'Ответ сохранён'
+    assert await click(h, event(row)) == 'Answer saved'
     assert h.rt.store.get(row['id'])['answer']['value'] == 'Bus'
     assert h.adapter._get_active_lane_id(h.peer, '456') == 'b'
     assert h.adapter._pending_edit(h.peer, '456', prune=False)
@@ -101,7 +101,7 @@ async def test_callback_fences(installed, monkeypatch, registrar, case):
         monkeypatch.setattr(h.adapter, 'build_source', scoped)
     if case == 'unknown':
         obj['payload']['data']['token'] = 'dq:' + 'f' * 32 + ':2'
-    assert await click(h, obj) != 'Ответ сохранён'
+    assert await click(h, obj) != 'Answer saved'
     assert not h.rt.store.get(row['id'])['answer']
     assert not h.rt.store.feedback(row['id'])
     assert not h.seen
@@ -116,14 +116,17 @@ async def test_old_adapter_no_keyboard_explicit_text_only(installed, monkeypatch
     args = sent_args(h)
     assert 'keyboard' not in args
     assert 'callback-registration-unavailable' in args['message']
-    assert f"@club99 @a dq {row['id']} НОМЕР" in args['message']
+    assert f"@club99 @a dq {row['id']} NUMBER" in args['message']
 
 
 @pytest.mark.asyncio
 async def test_owned_callback_cleanup_and_saved_button_reload(installed, monkeypatch, registrar):
     h = await harness(installed, monkeypatch)
-    row = new_question(h)
+    row = new_question(h, options=['Пешком', 'Автобус', 'Остаться дома'])
     await h.rt.dispatch_once('vk')
+    # A previously sent Russian label remains data, not an English-only key.
+    action = json.loads(sent_args(h)['keyboard'])['buttons'][0][1]['action']
+    assert action['label'] == 'Автобус'
     saved = event(row)
     old = h.adapter.test_callbacks['deferred_questions']
     h.rt.close()
@@ -133,8 +136,8 @@ async def test_owned_callback_cleanup_and_saved_button_reload(installed, monkeyp
     installed[0].discover_and_load(force=True)
     new = await harness(installed, monkeypatch)
     # Real persisted mapping is loaded into the new adapter, not payload/ledger lane.
-    assert await click(new, saved) == 'Ответ сохранён'
-    assert new.rt.store.get(row['id'])['answer']['value'] == 'Bus'
+    assert await click(new, saved) == 'Answer saved'
+    assert new.rt.store.get(row['id'])['answer']['value'] == 'Автобус'
 
 
 @pytest.mark.asyncio
@@ -148,7 +151,7 @@ async def test_native_routes_and_normalized_data(installed, monkeypatch, registr
     assert 'keyboard' in sent_args(h)
     obj = event(row, peer=peer)
     obj['data'] = obj.pop('payload')['data']
-    assert await click(h, obj) == 'Ответ сохранён'
+    assert await click(h, obj) == 'Answer saved'
     assert h.rt.store.get(row['id'])['answer']['value'] == 'Bus'
 
 
@@ -177,7 +180,7 @@ async def test_continuation_and_failed_feedback_survive_reopen(installed, monkey
             raise ConnectionError('controlled')
         return await method(name, params)
     h.adapter._vk_method = failed_edit
-    assert await click(h, event(row)) == 'Ответ сохранён'
+    assert await click(h, event(row)) == 'Answer saved'
     await asyncio.gather(*[task for task in h.rt._tasks['vk'] if not task.done()])
     original = h.rt.store
     h.rt.store = type(original)(original.home, original.profile)
@@ -190,7 +193,7 @@ async def test_continuation_and_failed_feedback_survive_reopen(installed, monkey
     assert len(h.seen) == 1
     assert h.seen[0].internal and h.seen[0].source.thread_id == 'lane:a'
     assert h.rt.store.pending_actions('vk') == []
-    assert await click(h, event(row)) == 'Ответ сохранён'
+    assert await click(h, event(row)) == 'Answer saved'
     assert h.rt.store.pending_actions('vk') == []
 
 

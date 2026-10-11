@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import pytest
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent))
 from test_deferred_questions import request, runtime, ControlledAdapter
 
 
@@ -28,7 +28,7 @@ async def test_telegram_answer_edit_removes_keyboard(installed):
     assert await rt.answer_feedback(qid) is True
     data = bot.edit_message_text.call_args.kwargs
     assert data['chat_id'] == '123' and data['message_id'] == 42
-    assert data['text'] == 'Which route today?\n\nОтвет сохранён: 2. Bus'
+    assert data['text'] == 'Which route today?\n\nAnswer saved: 2. Bus'
     assert data['reply_markup'] is None and data['parse_mode'] is None
     assert rt.store.get(qid)['answer']['value'] == 'Bus'
 
@@ -45,7 +45,7 @@ async def test_vk_feedback_uses_receipt_and_empty_keyboard(installed, message_id
     assert method == 'messages.edit'
     assert data[key] == value and data['peer_id'] == '123'
     assert json.loads(data['keyboard'])['buttons'] == []
-    assert data['message'].endswith('Ответ сохранён: 2. Bus')
+    assert data['message'].endswith('Answer saved: 2. Bus')
 
 
 @pytest.mark.asyncio
