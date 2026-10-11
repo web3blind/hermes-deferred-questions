@@ -2,7 +2,7 @@
 # Pins the tested plugin-source commit, not this later metadata-only commit.
 name: deferred-questions
 repo: https://github.com/web3blind/hermes-deferred-questions
-sha: 38ed92318a65ced3a036375d70e455ab7cd9154e
+sha: eeb86254725e8ba0d599f85d25c63488efd06364
 description: Durable non-blocking questions with exact answer binding and gateway continuation.
 maintainer: web3blind
 tier: community
