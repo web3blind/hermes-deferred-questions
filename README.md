@@ -27,6 +27,35 @@ callback decoder. Network/model effects are controlled at transport boundaries.
 Telegram and VK have been exercised in the originating deployment; this is not
 certification of other platforms or an automatic production health check.
 
+## Built-in store protection (0.2.5)
+
+No cron or external watchdog is required. Every CLI and gateway database operation
+uses one persistent, nonblocking cross-process store lock. Contention fails with a
+retryable busy error rather than blocking the gateway event loop.
+
+On the first healthy open, the plugin stores a private, path-bound template of
+SQLite's first 24 format bytes. On subsequent opens, it checks those bytes before
+opening SQLite. If only that header is damaged and no nonempty WAL/journal exists,
+it keeps the original in `deferred-questions/quarantine/`, prepares a candidate,
+and requires a full SQLite integrity check and the plugin tables before publishing
+it. All ledger bytes after offset 23 are preserved. Delivered receipts, answers,
+rowids and continuation states are never restored from an older snapshot.
+
+This is damage containment and recovery, **not a fix for an unrelated host/TLS FD
+bug**. Body damage, live journals, missing initialized ledgers, invalid metadata,
+and corrupt legacy stores without a trusted template fail closed. They require
+explicit offline recovery; the plugin never silently creates an empty replacement
+or rolls back to an old ledger (which could replay sends).
+
+**Upgrade boundary:** stop all gateway/CLI processes running older plugin versions
+and disable external scripts that replace this database before activating 0.2.5.
+Older versions and direct third-party SQLite writers do not honor the store lock.
+Do not move the database without its recovery metadata; paths are profile-bound.
+The persistent `store.lock` must not be removed while any process is running.
+
+The bundled catalog example remains pinned to the previously published 0.2.4
+until a new source pin is published and reviewed.
+
 ## Install
 
 This repository is prepared for catalog review; it is **not yet an approved

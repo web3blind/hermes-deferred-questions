@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.5
+
+- Protect every Store connection with a persistent nonblocking inter-process lock.
+- Enroll trusted private format-header metadata on a healthy open and detect header
+  damage both on startup and in a running worker, without an external cron.
+- Quarantine and validate header-only repairs; preserve ledger body and delivery,
+  answer and continuation receipts. Never roll back an old ledger or rebuild an
+  initialized missing store. Live journals and non-header corruption fail closed.
+- Stop all older plugin processes and external store-replacement watchdogs before
+  upgrading; direct third-party SQLite writers are outside the lock protocol.
+
 ## 0.2.4
 
 - Require Hermes >=0.21.6 and declare Linux/macOS support.

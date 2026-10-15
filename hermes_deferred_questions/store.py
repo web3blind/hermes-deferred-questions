@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import fcntl
+import hashlib
+import logging
+import os
+import shutil
 import json
 import math
 import re
@@ -105,6 +110,8 @@ class Store:
         folder = Path(self.home) / 'deferred-questions'
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = folder / 'questions.sqlite3'
+        if self.path.is_symlink():
+            raise sqlite3.DatabaseError('Deferred Questions ledger symlinks are unsupported')
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('''CREATE TABLE IF NOT EXISTS questions (
@@ -127,13 +134,127 @@ class Store:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=5)
-        db.row_factory = sqlite3.Row
+        # One persistent inode fences EVERY participating CLI/gateway connection.
+        # Never wait on flock in the gateway event loop, and never unlink the lock.
+        lock = self.path.with_name('store.lock').open('a+b')
         try:
-            with db:
-                yield db
+            os.fchmod(lock.fileno(), 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise sqlite3.OperationalError('Deferred Questions store busy; retry later') from None
+            self._preflight()
+            db = sqlite3.connect(self.path, timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                with db:
+                    yield db
+                self._save_header(db)
+            finally:
+                db.close()
         finally:
-            db.close()
+            lock.close()
+
+    def _header_file(self):
+        return self.path.with_name('store-header.json')
+
+    @staticmethod
+    def _sync_dir(path):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _save_header(self, db):
+        # First 24 SQLite header bytes are format metadata, not ledger state.
+        # Never recover from an older ledger snapshot: that can replay external sends.
+        target = self._header_file()
+        if target.exists():
+            return
+        if db.execute('PRAGMA integrity_check').fetchall()[0][0] != 'ok':
+            raise sqlite3.DatabaseError('Deferred Questions integrity check failed')
+        with self.path.open('rb') as f:
+            header = f.read(24)
+        if not header.startswith(b'SQLite format 3\x00'):
+            raise sqlite3.DatabaseError('Deferred Questions invalid store header')
+        record = dict(path=str(self.path.resolve()), header=header.hex(),
+                      checksum=hashlib.sha256(header).hexdigest())
+        tmp = target.with_name('.header-' + uuid.uuid4().hex)
+        try:
+            with tmp.open('xb') as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(dumps(record).encode())
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+            self._sync_dir(target.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _preflight(self):
+        target = self._header_file()
+        if not self.path.exists():
+            if target.exists():
+                raise sqlite3.DatabaseError('Deferred Questions ledger missing; refusing empty replacement')
+            return
+        with self.path.open('rb') as f:
+            header = f.read(24)
+        if not target.exists():
+            if header.startswith(b'SQLite format 3\x00'):
+                return  # First healthy legacy open enrolls protection after migration.
+            # Legacy corrupt stores have no trustworthy template. Do not guess.
+            raise sqlite3.DatabaseError('Deferred Questions header damaged; no trusted recovery metadata')
+        try:
+            record = json.loads(target.read_text())
+            template = bytes.fromhex(record['header'])
+            valid = (record['path'] == str(self.path.resolve()) and len(template) == 24
+                     and template.startswith(b'SQLite format 3\x00')
+                     and hashlib.sha256(template).hexdigest() == record['checksum'])
+        except (ValueError, KeyError, TypeError):
+            valid = False
+        if not valid:
+            raise sqlite3.DatabaseError('Deferred Questions recovery metadata invalid; ledger unchanged')
+        if header == template:
+            return
+        # No safe header-only repair if committed state may still live in a WAL.
+        # Keep the entire file set untouched for explicit offline recovery.
+        for suffix in ('-wal', '-journal'):
+            side = Path(str(self.path) + suffix)
+            if side.exists() and side.stat().st_size:
+                raise sqlite3.DatabaseError('Deferred Questions damaged header with live journal; offline recovery required')
+        folder = self.path.parent / 'quarantine' / uuid.uuid4().hex
+        folder.mkdir(mode=0o700, parents=True)
+        saved = folder / self.path.name
+        shutil.copyfile(self.path, saved)
+        saved.chmod(0o600)
+        with saved.open('rb') as f:
+            os.fsync(f.fileno())
+        self._sync_dir(folder)
+        self._sync_dir(folder.parent)
+        self._sync_dir(self.path.parent)
+        candidate = folder / 'candidate.sqlite3'
+        shutil.copyfile(saved, candidate)
+        candidate.chmod(0o600)
+        with candidate.open('r+b') as f:
+            f.write(template)
+            f.flush()
+            os.fsync(f.fileno())
+        # Validation never opens the damaged original and never runs migrations.
+        check = sqlite3.connect(candidate.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
+        try:
+            if check.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise sqlite3.DatabaseError('Deferred Questions body damaged; no automatic rollback')
+            for table in ('questions', 'answer_actions', 'feedback_edits'):
+                check.execute('SELECT * FROM ' + table + ' LIMIT 0')
+        finally:
+            check.close()
+        # All plugin connections have drained before this exclusive store lease.
+        # Body/receipts/rowids are byte-identical; only 24 format bytes may change.
+        os.replace(candidate, self.path)
+        self._sync_dir(self.path.parent)
+        logging.getLogger(__name__).warning(
+            'Deferred Questions repaired format header; ledger body preserved; original quarantined')
 
     @staticmethod
     def unpack(row):
