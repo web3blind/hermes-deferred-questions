@@ -9,14 +9,18 @@ import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 import tempfile
 import time
 import uuid
+import weakref
 from types import SimpleNamespace
+from typing import Awaitable, Callable
 
 from gateway.session_identity import identity_of
 
 from .store import ROUTE_FIELDS
+from .notify import Endpoint, notify
 
 log = logging.getLogger(__name__)
 TOKEN = re.compile(r'dq:([0-9a-f]{32}):([1-9][0-9]{0,2})\Z')
@@ -27,6 +31,7 @@ TEXT = re.compile(r'dq ([0-9a-f]{32}) (.+)\Z', re.DOTALL)
 class Delivery:
     """Transport acknowledged the send; some text-only transports expose no wire ID."""
     message_id: str | None
+    after_receipt: Callable[[], Awaitable[None]] | None = None
 
 
 class Runtime:
@@ -49,7 +54,49 @@ class Runtime:
         self._heartbeat_stage = None
         self._heartbeat_reason = None
         self._lock = __import__('threading').RLock()
+        self._events = {}
+        self._feedback_dirty = set()
+        self._endpoint = Endpoint(self.store.home, self._wake_all)
+        if not hasattr(self.store, "_wakers"):
+            self.store._wakers = []
+        self.store._wakers.append(weakref.WeakMethod(self.changed))
         self._unload_handle = ctx.on_unload(self.close)
+
+    def _wake_all(self):
+        with self._lock:
+            if not self.live:
+                return
+            for loop, event in tuple(self._events.values()):
+                if loop.is_running() and not loop.is_closed():
+                    loop.call_soon_threadsafe(event.set)
+
+    def changed(self):
+        """In-process event, or one profile-local cross-process notice after commit."""
+        with self._lock:
+            if not self.live:
+                return False
+            local = bool(self._events)
+        if local:
+            self._wake_all()
+            return True
+        return notify(self.store.home)
+
+    def on_turn_start(self, *, user_message=None, turn_id=None, **kwargs):
+        """Bind only the current input's persisted, opaque attempt to this turn.
+
+        The marker is correlation, not authorization. Route and sender checks have
+        already happened before saving the answer and admitting the internal event.
+        No matches from history, guessed next session turn, or assistant output.
+        """
+        if not self.live or not isinstance(user_message, str) or not isinstance(turn_id, str) or not turn_id:
+            return
+        tokens = re.findall(r'^\[Hermes deferred-answer receipt: ([0-9a-f]{32})\]$', user_message, re.MULTILINE)
+        if len(tokens) == 1:
+            self.store.bind_turn(tokens[0], turn_id)
+
+    def on_turn_end(self, *, turn_id=None, completed=None, failed=None, interrupted=None, **kwargs):
+        if self.live and isinstance(turn_id, str) and turn_id:
+            self.store.finish_turn(turn_id, completed=completed, failed=failed, interrupted=interrupted)
 
     def _heartbeat(self, *, unloading=False):
         """Best-effort private Telegram observation, never a delivery decision."""
@@ -150,6 +197,7 @@ class Runtime:
             if not self.live:
                 return
             self.live = False  # Fence effects synchronously on the discovering thread.
+            self._endpoint.close()
             self.ctx = None
             self._desired.clear()
             for platform in set(self._bindings) | set(self._pending_bindings):
@@ -201,7 +249,8 @@ class Runtime:
             # can retire that factory's runtime during connect; recovery must not
             # discard its cached candidate merely because readiness is still false.
             # This waiter belongs to the new runtime (and its drain), not the cache.
-            while True:
+            deadline = asyncio.get_running_loop().time() + 10
+            while asyncio.get_running_loop().time() < deadline:
                 with self._lock:
                     if (not self.live or self.ctx is None or not self._unload_handle.active
                             or platform in self._desired):
@@ -211,6 +260,8 @@ class Runtime:
                         return
                     self._reasons[platform] = 'not_connected'
                 await asyncio.sleep(.01)
+            self._reasons[platform] = 'connect_readiness_timeout'
+            return
         if adapter.is_connected:
             with self._lock:
                 if platform not in self._desired:
@@ -368,7 +419,13 @@ class Runtime:
             except Exception:
                 pass
         row = self.store.get(match[1])
-        mismatch = (route is None or row is None or any(
+        if row is not None and row.get('compacted') is True and callable(check):
+            try:
+                if check(event.source) is True:
+                    return {'action': 'skip', 'reason': 'deferred-question:completed'}
+            except Exception:
+                pass
+        mismatch = (route is None or row is None or row.get('compacted') is True or any(
             route.get(k) != row['request'].get(k)
             for k in ROUTE_FIELDS + ('profile', 'profile_home')))
         if mismatch:
@@ -388,8 +445,10 @@ class Runtime:
         if not authorized:
             return None
         result = self.store.answer(match[1], match[2], route, authorized=True, message_id=prompt_message_id)
-        if result in ('answered', 'already_answered') and route['platform'] in ('telegram', 'vk'):
-            self._spawn(self.answer_feedback(match[1]), route['platform'])
+        if result in ('answered', 'already_answered'):
+            self._wake_all()
+            if route['platform'] in ('telegram', 'vk'):
+                self._spawn(self.answer_feedback(match[1]), route['platform'])
         return {'action': 'skip', 'reason': f'deferred-question:{result}'}
 
     def callback(self, adapter, token, source, message_id):
@@ -399,8 +458,16 @@ class Runtime:
         route = self.route(source)
         if route is None:
             return 'wrong_route'
-        return self.store.answer(match[1], match[2], route,
-                                 authorized=self.authorized(adapter, source), message_id=str(message_id))
+        try:
+            result = self.store.answer(match[1], match[2], route,
+                                       authorized=self.authorized(adapter, source), message_id=str(message_id))
+        except sqlite3.OperationalError as exc:
+            if 'store busy' not in str(exc):
+                raise
+            return 'busy; please press again'
+        if result in ('answered', 'already_answered'):
+            self._wake_all()
+        return result
 
     async def dispatch_feedback_once(self, platform):
         """Independent stage: failure never blocks continuation admission."""
@@ -514,7 +581,8 @@ class Runtime:
                         pass  # Preserve the path; never wait on another process.
                     else:
                         intent = self.store.feedback(qid)
-                        if intent is not None and intent['state'] == 'done':
+                        compacted = intent is None and (self.store.get(qid) or {}).get('compacted') is True
+                        if (intent is not None and intent['state'] == 'done') or compacted:
                             path.unlink(missing_ok=True)
                 except Exception:
                     # A duplicate callback may retry retained done-path cleanup.
@@ -533,7 +601,7 @@ class Runtime:
         """
         import time
         row = self.store.get(qid)
-        if not self.live or not row:
+        if not self.live or not row or row.get('compacted') is True:
             return False
         with self._feedback_lock(qid) as acquired:
             if not acquired:
@@ -648,11 +716,12 @@ class Runtime:
             if owner != self.store.profile:
                 return
             loop = asyncio.get_running_loop()
-            self._desired[platform] = (native, adapter)
+            self._desired[platform] = (native, adapter, loop)
             current = self.adapters.get(platform)
             receipt = None
             if current is not None:
                 if current[0] is native and current[1] is adapter:
+                    self._wake_all()
                     return
                 receipt = self._retire(platform)
             self._pending_bindings[platform] = (native, adapter, loop)
@@ -708,34 +777,88 @@ class Runtime:
         if not self.live:
             return
         self._reasons[platform] = None if result else 'drain_failed'
-        native, adapter = self._desired.get(platform, (native, adapter))
-        if result and adapter.is_connected:
-            self.wire(platform, native, adapter)
+        desired = self._desired.get(platform)
+        if result and desired is not None:
+            native, adapter, owner_loop = desired
+            def finish_wire():
+                with self._lock:
+                    if self.live and self._desired.get(platform) == desired:
+                        self.wire(platform, native, adapter)
+            if owner_loop.is_running() and not owner_loop.is_closed():
+                owner_loop.call_soon_threadsafe(finish_wire)
         if platform == 'telegram' and self.live:
             self._heartbeat()
 
+    def _feedback_finished(self, platform, task):
+        if not task.cancelled() and task.exception() is not None and self.live:
+            self._reasons[platform] = 'feedback_stage_failed'
+            log.warning('Deferred feedback stage failed')
+        # A newer notice arrived during this snapshot's awaited edit. Drain once
+        # more, but never loop merely because a failed edit remains pending.
+        if self.live and self.feedback_workers.get(platform) is task and platform in self._feedback_dirty:
+            self._feedback_dirty.discard(platform)
+            binding = self._events.get(platform)
+            if binding is not None and binding[0].is_running() and not binding[0].is_closed():
+                binding[0].call_soon_threadsafe(binding[1].set)
+
+    async def _ready_once(self, platform):
+        # Native factories can run before connect() completes. This bounded
+        # connection-readiness wait never queries the database or schedules jobs.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while self.live and platform in self.adapters:
+            if self.adapters[platform][1].is_connected:
+                return True
+            if loop.time() >= deadline:
+                self._reasons[platform] = 'connect_readiness_timeout'
+                return False
+            await asyncio.sleep(.01)
+        return False
+
     async def worker(self, platform):
-        while self.live:
-            for stage, operation in (('dispatch', self.dispatch_once),
-                                     ('continuation', self.dispatch_answers_once)):
+        # One recovery pass at binding/reconnect, then only explicit notifications.
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        event.set()
+        binding = (loop, event)
+        self._events[platform] = binding
+        try:
+            await self._endpoint.start()
+            while self.live:
+                await event.wait()
+                event.clear()  # notices during a pass remain set for the next pass
+                if not await self._ready_once(platform):
+                    continue
+                for stage, operation in (('dispatch', self.dispatch_once),
+                                         ('continuation', self.dispatch_answers_once)):
+                    try:
+                        await operation(platform)
+                        if self._reasons.get(platform) == stage + '_stage_failed':
+                            self._reasons.pop(platform, None)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self._reasons[platform] = stage + '_stage_failed'
+                        if platform == 'telegram':
+                            self._heartbeat_stage = stage
+                        log.warning('Deferred question stage failed: %s', stage)
                 try:
-                    await operation(platform)
-                except asyncio.CancelledError:
-                    raise
+                    task = self.feedback_workers.get(platform)
+                    if task is None or task.done():
+                        self._feedback_dirty.discard(platform)
+                        task = self._spawn(self.dispatch_feedback_once(platform), platform)
+                        self.feedback_workers[platform] = task
+                        if task is not None:
+                            task.add_done_callback(lambda t, p=platform: self._feedback_finished(p, t))
+                    else:
+                        self._feedback_dirty.add(platform)
                 except Exception:
-                    self._reasons[platform] = stage + '_stage_failed'
-                    if platform == 'telegram':
-                        self._heartbeat_stage = stage
-                    log.warning('Deferred question stage failed: %s', stage)
-            try:
-                task = self.feedback_workers.get(platform)
-                if task is None or task.done():
-                    self.feedback_workers[platform] = self._spawn(self.dispatch_feedback_once(platform), platform)
-            except Exception:
-                log.warning('Deferred feedback stage failed')
-            if platform == 'telegram' and self.live:
-                self._heartbeat()
-            await asyncio.sleep(1)
+                    log.warning('Deferred feedback stage failed')
+                if platform == 'telegram' and self.live:
+                    self._heartbeat()
+        finally:
+            if self._events.get(platform) is binding:
+                self._events.pop(platform, None)
 
     async def dispatch_answers_once(self, platform):
         """Opt-in continuation via normal gateway admission, not a separate agent."""
@@ -759,10 +882,14 @@ class Runtime:
             except Exception:
                 self._reasons[platform] = 'continuation_session_failed'
                 continue
-            if not key or not self.store.claim_action(row['id']):
+            if not key:
+                continue
+            attempt_token = self.store.claim_continuation(row['id'])
+            if not attempt_token:
                 continue
             answer = row['answer']
-            text = ('User answer to a deferred question.\n'
+            text = (f'[Hermes deferred-answer receipt: {attempt_token}]\n'
+                    + 'User answer to a deferred question.\n'
                     + 'Question: ' + r['question'] + '\n'
                     + 'Answer: ' + answer['value'] + '\n'
                     + 'Continue the current task using this answer and the relevant skill rules. '
@@ -773,14 +900,15 @@ class Runtime:
                                  metadata={'gateway_session_key': key, 'deferred_question_id': row['id']})
             try:
                 await asyncio.wait_for(admit_internal_event(adapter, event), timeout=30)
-                self.store.finish_action(row['id'], 'admitted')
             except WakeNotAccepted:
-                self.store.finish_action(row['id'], 'pending')
+                await self._write_once(self.store.finish_action, row['id'], 'pending')
             except asyncio.CancelledError:
                 raise  # Leave dispatching held: no blind duplicate agent turn.
             except Exception:
-                self.store.finish_action(row['id'], 'unknown')
+                await self._write_once(self.store.finish_action, row['id'], 'unknown')
                 log.warning('Deferred answer continuation admission is uncertain')
+            else:
+                await self._write_once(self.store.finish_action, row['id'], 'admitted')
 
     def _row_source(self, adapter, row, stage):
         r = row['request']
@@ -831,17 +959,41 @@ class Runtime:
             except asyncio.CancelledError:
                 raise
 
+    async def _write_once(self, operation, *args, **kwargs):
+        """Finish one known receipt on a normal IO thread, even during drain.
+
+        The outer worker/send attempt owns this await. Shield the inner thread
+        wrapper, and do not release that ownership until the write has finished.
+        This does not retry transport/model effects or schedule another job.
+        """
+        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
     async def _deliver(self, platform, native, adapter, row):
         if not self.live or self.adapters.get(platform) != (native, adapter):
             return
         try:
             delivery = await self.send(platform, native, adapter, row)
-            self.store.receipt(row['id'], delivery.message_id if delivery else None,
-                               None if delivery else 'no_confirmed_receipt', confirmed=delivery is not None)
         except asyncio.CancelledError:
             raise  # Durable sending remains held; never infer that no effect happened.
         except Exception:
-            self.store.receipt(row['id'], diagnostic='transport_exception')
+            await self._write_once(self.store.receipt, row['id'], diagnostic='transport_exception')
+            return
+        # Persistence failure is NOT a transport failure. Keep the acknowledged
+        # message ID and never overwrite a known ACK with an unknown receipt.
+        await self._write_once(self.store.receipt, row['id'], delivery.message_id if delivery else None,
+                               None if delivery else 'no_confirmed_receipt', confirmed=delivery is not None)
+        if delivery is not None and delivery.after_receipt is not None:
+            await delivery.after_receipt()
 
     def wire_vk(self, adapter):
         """Consume the generic namespace registrar; SDK acknowledgment stays in VK."""
@@ -1092,19 +1244,17 @@ class Runtime:
                 args['message'] = text + '\n\n' + instruction
             result = await adapter._vk_method('messages.send', args)
             message_id = adapter._sent_message_id(result)
-            if message_id:
-                # Persist the known receipt BEFORE any await in optional local
-                # bookkeeping, including timeout/cancellation/unload boundaries.
-                # dispatch_once's later receipt is an idempotent no-op for sent.
-                self.store.receipt(row['id'], str(message_id), confirmed=True)
-            if message_id and r['thread_id']:
+            if not message_id:
+                return None
+            async def remember_lane():
                 try:
                     await adapter._remember_message_lane(r['chat_id'], message_id, r['thread_id'])
                 except Exception:
-                    # Network ACK is already known. Never turn a local failure into
-                    # an uncertain send or discard the receipt (and never retry send).
                     log.warning('Deferred VK send acknowledged; local lane bookkeeping failed')
-            return Delivery(str(message_id)) if message_id else None
+            # Return the ACK without another awaited effect. The dispatcher owns
+            # persistence OUTSIDE the transport exception boundary, then performs
+            # optional lane bookkeeping only AFTER that known receipt is durable.
+            return Delivery(str(message_id), remember_lane if r['thread_id'] else None)
         if (platform == 'whatsapp_cloud' and buttons and len(buttons) <= 10
                 and len(snapshot['text']) <= 1024 and r['chat_type'] == 'dm' and not r['thread_id']):
             if len(buttons) <= 3:

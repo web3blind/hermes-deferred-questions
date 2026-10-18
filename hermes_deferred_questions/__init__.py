@@ -25,6 +25,7 @@ def configure_parser(parser):
     listing.add_argument('--limit', type=int, default=50)
     cancel = sub.add_parser('cancel', help='Cancel a queued/delivered question')
     cancel.add_argument('id')
+    sub.add_parser('wake', help='Notify the connected gateway of persisted work once')
 
 
 def register(ctx):
@@ -39,14 +40,20 @@ def register(ctx):
     def operate(action, request=None, qid=None, limit=50):
         if not runtime.live:
             raise ValueError('plugin unloaded')
+        if action == 'wake':
+            return {'notification_sent': runtime.changed()}
         if action == 'request':
-            return store.create(request, platforms)
+            result = store.create(request, platforms)
+            result['notification_sent'] = runtime.changed()
+            return result
         if action == 'get':
             return store.get(qid)
         if action == 'list':
             return store.list(limit)
         if action == 'cancel':
-            return {'cancelled': store.cancel(qid)}
+            result = {'cancelled': store.cancel(qid)}
+            runtime.changed()
+            return result
         raise ValueError('unknown action')
 
     def cli(args):
@@ -96,6 +103,8 @@ def register(ctx):
                       check_fn=lambda: runtime.live and ctx.get_config('enable_tool', False) is True)
     ctx.register_cli_command('deferred-questions', 'Durable non-blocking questions', configure_parser, cli)
     ctx.register_hook('pre_gateway_dispatch', runtime.pre_dispatch)
+    ctx.register_hook('pre_llm_call', runtime.on_turn_start)
+    ctx.register_hook('on_session_end', runtime.on_turn_end)
     ctx.register_slack_action_handler(re.compile(r'^hermes_dq_[0-9]+$'), runtime.slack_action)
 
     # Factory qualnames must differ per platform, not the usual loop-lambda default argument trap.

@@ -27,6 +27,50 @@ callback decoder. Network/model effects are controlled at transport boundaries.
 Telegram and VK have been exercised in the originating deployment; this is not
 certification of other platforms or an automatic production health check.
 
+## Event-driven processing and retention (0.3.0)
+
+The plugin does not poll SQLite while idle and has no per-question retry/expiry
+scheduler. Producers commit first, then issue one profile-local Unix-socket wake.
+The gateway recovers queued work once on binding/reconnect and otherwise waits
+for notices. Button callbacks save the answer and wake continuation directly.
+A notice arriving during an in-flight feedback edit schedules one further pass;
+store contention requests a lease-release notice, not a retry timer. A bounded
+native connection-readiness wait performs no database reads and stops after ten
+seconds. If native readiness never arrives, the runtime reports degraded state
+and waits for a new connection/wake event, rather than polling indefinitely.
+
+`request` returns `result.notification_sent`: it confirms the wake receipt, not
+message delivery or model completion. If it is false, the question is still
+persisted. Binding/reconnect recovery or `hermes deferred-questions wake` can
+wake it later. A producer crash between commit and notice likewise leaves durable
+work; there is no hidden retry daemon promising eventual delivery without a new
+event. Expiry is checked on access; there is no timed removal of old buttons.
+
+For `continue_agent: true`, an atomic claim saves a random attempt token before
+admission. A technical marker in the current internal input correlates that token
+with the opaque `pre_llm_call.turn_id`. Only explicit
+`on_session_end(completed=True, failed=False, interrupted=False)` permits content
+retirement, after applicable feedback removal is finished. Missing fields,
+interruption, error and ambiguous admission keep the record. This is technical
+turn completion, **not proof of outbound delivery or of the skill's business
+result**; the plugin never judges whether an agent scheduled the correct cron.
+
+Retirement removes the question, options, snapshot, answer, action and feedback
+payload. A text-free receipt (ID, idempotency key, request hash and terminal state)
+is retained for seven days, or through the original answer deadline if later.
+Receipt pruning is opportunistic on opening the store, not a background timer.
+SQLite reuses cleared pages; `secure_delete` clears retired payload bytes in the
+live ledger, but external backups/quarantines are separate operator-owned data.
+VK delivery nonces now have a persistent monotonic sequence and are not reused
+when rows are deleted. Existing nonce values are preserved during migration.
+
+Uncertain old `admitted` records without a completion token cannot be certified
+retroactively and are not silently erased. Storage-only answers without
+`continue_agent` have no agent-completion receipt and remain available to their
+consumer. Unsupported message-edit surfaces cannot guarantee visual button
+removal, but retired IDs never trigger another continuation. Stop old plugin
+processes and back up the ledger before upgrading this additive schema/protocol.
+
 ## Built-in store protection (0.2.5)
 
 No cron or external watchdog is required. Every CLI and gateway database operation
@@ -150,7 +194,7 @@ the complete list and original labels remain in the stored snapshot.
 - Expiry is materialized during queue/read/answer access. Late answers cannot win.
   Cancellation does not retract a platform message and cannot overwrite an answer.
 - Telegram and VK answer/expiry/cancellation feedback uses a durable edit outbox.
-  Failed edits do not erase accepted answers. Transient edits have bounded backoff;
+  Failed edits do not erase accepted answers. Transient edits may be revisited on a later explicit wake;
   uncertain/deleted/permanent outcomes are held or marked deleted, not resent.
   Per-question feedback locks are removed only after durable `done`, while still
   locked. A single persistent `feedback.lock` admission guard serializes lock
@@ -215,8 +259,9 @@ operations do not create it. It contains PID, generation, timestamp, live/bound/
 worker/adapter state and fixed reason/error-stage codes—not tokens, question text,
 recipient IDs, profile IDs or raw exceptions. Write failures never affect delivery.
 
-Missing, future-dated, older-than-five-second or mismatched-PID snapshots are
-unknown/stale, not proof of transport failure or health. PID reuse is possible;
+Snapshots describe the most recent processed event, not periodic liveness. An
+old timestamp is normal while idle; missing, future-dated or mismatched-PID
+snapshots cannot prove transport failure or health. PID reuse is possible;
 `worker_alive` can briefly remain true during unload drain. Retired generations
 must not overwrite their replacement. Read without modifying the file.
 

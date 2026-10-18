@@ -12,6 +12,7 @@ import math
 import re
 import sqlite3
 import time
+import threading
 import uuid
 from pathlib import Path
 
@@ -126,27 +127,61 @@ class Store:
                 target_state TEXT NOT NULL, message_id TEXT NOT NULL,
                 state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt REAL NOT NULL DEFAULT 0, diagnostic TEXT)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS completion_attempts (
+                token TEXT UNIQUE NOT NULL, question_id TEXT UNIQUE NOT NULL,
+                turn_id TEXT UNIQUE, state TEXT NOT NULL, completed REAL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS tombstones (
+                id TEXT PRIMARY KEY, idem TEXT UNIQUE NOT NULL, request_hash TEXT NOT NULL,
+                state TEXT NOT NULL, completed REAL NOT NULL, retain_until REAL NOT NULL)''')
+            db.execute('CREATE TABLE IF NOT EXISTS delivery_sequence (value INTEGER NOT NULL)')
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(questions)')}
+            if 'delivery_nonce' not in columns:
+                db.execute('ALTER TABLE questions ADD COLUMN delivery_nonce INTEGER')
+                db.execute('UPDATE questions SET delivery_nonce=rowid')
+            if not db.execute('SELECT 1 FROM delivery_sequence').fetchone():
+                db.execute('INSERT INTO delivery_sequence VALUES (?)',
+                           (db.execute('SELECT COALESCE(MAX(delivery_nonce),0) FROM questions').fetchone()[0],))
             # Additive, repeatable migration: old terminal receipts need cleanup too.
             for row in db.execute("SELECT * FROM questions WHERE message_id IS NOT NULL "
-                                  "AND state IN ('answered','expired','cancelled')").fetchall():
+                                  "AND state IN ('answered','expired','cancelled') "
+                                  "AND NOT EXISTS (SELECT 1 FROM feedback_edits f WHERE f.question_id=questions.id)").fetchall():
                 self._feedback_intent(db, row['id'])
         self.path.chmod(0o600)
+        self.prune()
 
     @contextmanager
     def connect(self):
         # One persistent inode fences EVERY participating CLI/gateway connection.
         # Never wait on flock in the gateway event loop, and never unlink the lock.
         lock = self.path.with_name('store.lock').open('a+b')
+        acquired = False
         try:
             os.fchmod(lock.fileno(), 0o600)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise sqlite3.OperationalError('Deferred Questions store busy; retry later') from None
+                # Ask the current owner for ONE release event, not a timed retry.
+                marker = self.path.with_name('store-wake')
+                fd = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
+                os.close(fd)
+                blocking = False
+                if threading.current_thread() is not threading.main_thread():
+                    try:
+                        __import__('asyncio').get_running_loop()
+                    except RuntimeError:
+                        blocking = True
+                try:
+                    # Every nonblocking caller retries AFTER publishing its marker:
+                    # if release raced with the marker, this owner will consume it.
+                    fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    raise sqlite3.OperationalError('Deferred Questions store busy; release event pending') from None
+            acquired = True
             self._preflight()
             db = sqlite3.connect(self.path, timeout=5)
             db.row_factory = sqlite3.Row
             try:
+                db.execute('PRAGMA secure_delete=ON')
                 with db:
                     yield db
                 self._save_header(db)
@@ -154,6 +189,25 @@ class Store:
                 db.close()
         finally:
             lock.close()
+            if acquired:
+                self._release_notice()
+
+    def _release_notice(self):
+        marker = self.path.with_name('store-wake')
+        try:
+            if not marker.exists():
+                return
+            marker.unlink()
+            signalled = False
+            for reference in tuple(getattr(self, '_wakers', ())):
+                callback = reference()
+                if callback is not None:
+                    signalled = callback() or signalled
+            if not signalled:
+                from .notify import notify
+                notify(self.home)
+        except Exception:
+            pass  # Never turn a committed operation into a failed write receipt.
 
     def _header_file(self):
         return self.path.with_name('store-header.json')
@@ -275,15 +329,22 @@ class Store:
         encoded = dumps(r)
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            existing = db.execute('SELECT rowid AS delivery_nonce,* FROM questions WHERE idem=?', (r['idempotency_key'],)).fetchone()
+            existing = db.execute('SELECT * FROM questions WHERE idem=?', (r['idempotency_key'],)).fetchone()
             if existing:
                 if existing['request'] != encoded:
                     raise ValueError('idempotency_key already belongs to a different request')
                 return self.unpack(existing)
+            tombstone = db.execute('SELECT * FROM tombstones WHERE idem=?', (r['idempotency_key'],)).fetchone()
+            if tombstone:
+                if tombstone['request_hash'] != hashlib.sha256(encoded.encode()).hexdigest():
+                    raise ValueError('idempotency_key already belongs to a different request')
+                return self._tombstone(tombstone)
             if r['expires_at'] <= time.time():
                 raise ValueError('expires_at must be in the future')
-            db.execute('INSERT INTO questions(id,idem,request,snapshot,state,created) VALUES(?,?,?,?,?,?)',
-                       (qid, r['idempotency_key'], encoded, dumps(snapshot), 'queued', time.time()))
+            db.execute('UPDATE delivery_sequence SET value=value+1')
+            nonce = db.execute('SELECT value FROM delivery_sequence').fetchone()[0]
+            db.execute('INSERT INTO questions(id,idem,request,snapshot,state,created,delivery_nonce) VALUES(?,?,?,?,?,?,?)',
+                       (qid, r['idempotency_key'], encoded, dumps(snapshot), 'queued', time.time(), nonce))
         return self.get(qid)
 
     def expire(self):
@@ -300,29 +361,35 @@ class Store:
             raise ValueError('invalid question ID')
         self.expire()
         with self.connect() as db:
-            return self.unpack(db.execute('SELECT rowid AS delivery_nonce,*, '
-                                          '(SELECT state FROM answer_actions WHERE question_id=questions.id) AS continuation_state, '
-                                          '(SELECT state FROM feedback_edits WHERE question_id=questions.id) AS feedback_state, '
-                                          '(SELECT version FROM feedback_edits WHERE question_id=questions.id) AS feedback_version '
-                                          'FROM questions WHERE id=?', (qid,)).fetchone())
+            row = db.execute('SELECT *, '
+                             '(SELECT state FROM answer_actions WHERE question_id=questions.id) AS continuation_state, '
+                             '(SELECT state FROM feedback_edits WHERE question_id=questions.id) AS feedback_state, '
+                             '(SELECT version FROM feedback_edits WHERE question_id=questions.id) AS feedback_version '
+                             'FROM questions WHERE id=?', (qid,)).fetchone()
+            if row:
+                return self.unpack(row)
+            tombstone = db.execute('SELECT * FROM tombstones WHERE id=?', (qid,)).fetchone()
+            return self._tombstone(tombstone) if tombstone else None
 
     def list(self, limit=50):
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError('limit must be an integer from 1 to 200')
         self.expire()
         with self.connect() as db:
-            return [self.unpack(r) for r in db.execute('SELECT rowid AS delivery_nonce,* FROM questions ORDER BY created DESC,id LIMIT ?', (limit,))]
+            rows = [self.unpack(r) for r in db.execute('SELECT * FROM questions ORDER BY created DESC,id LIMIT ?', (limit,))]
+            rows.extend(self._tombstone(r) for r in db.execute('SELECT * FROM tombstones ORDER BY completed DESC,id LIMIT ?', (limit,)))
+            return sorted(rows, key=lambda r: (r.get('created', r.get('completed', 0)), r['id']), reverse=True)[:limit]
 
     def queued(self, platform):
         self.expire()
         with self.connect() as db:
-            rows = db.execute("SELECT rowid AS delivery_nonce,* FROM questions WHERE state='queued' ORDER BY created,id").fetchall()
+            rows = db.execute("SELECT * FROM questions WHERE state='queued' ORDER BY created,id").fetchall()
         return [self.unpack(r) for r in rows if json.loads(r['request'])['platform'] == platform]
 
     def claim(self, qid):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = self.unpack(db.execute('SELECT rowid AS delivery_nonce,* FROM questions WHERE id=?', (qid,)).fetchone())
+            row = self.unpack(db.execute('SELECT * FROM questions WHERE id=?', (qid,)).fetchone())
             if row is None or row['state'] != 'queued':
                 return False
             if row['request']['expires_at'] <= time.time():
@@ -351,7 +418,7 @@ class Store:
             return 'unauthorized'
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = self.unpack(db.execute('SELECT rowid AS delivery_nonce,* FROM questions WHERE id=?', (qid,)).fetchone())
+            row = self.unpack(db.execute('SELECT * FROM questions WHERE id=?', (qid,)).fetchone())
             if row is None:
                 return 'unknown_question'
             r = row['request']
@@ -402,7 +469,7 @@ class Store:
     def pending_feedback(self, platform):
         self.expire()
         with self.connect() as db:
-            rows = db.execute("SELECT q.rowid AS delivery_nonce,q.* FROM questions q JOIN feedback_edits f "
+            rows = db.execute("SELECT q.* FROM questions q JOIN feedback_edits f "
                               "ON f.question_id=q.id WHERE f.state='pending' AND f.next_attempt<=? "
                               "ORDER BY q.created,q.id", (time.time(),)).fetchall()
         return [self.unpack(r) for r in rows if json.loads(r['request'])['platform'] == platform]
@@ -421,17 +488,37 @@ class Store:
             if row is None:
                 return False
             attempts = row['attempts'] + 1
-            # Infinite recovery of safe edits, but capped delay and bounded attempts per pass.
+            # A later explicit wake may revisit safe edits; no job timer is scheduled.
             delay = max(min(300, 2 ** min(attempts, 9)), retry_after) if state == 'pending' else 0
-            return db.execute('UPDATE feedback_edits SET state=?,attempts=?,next_attempt=?,diagnostic=? '
-                              "WHERE question_id=? AND version=? AND state='pending'",
-                              (state, attempts, time.time() + delay, diagnostic, qid, version)).rowcount == 1
+            changed = db.execute('UPDATE feedback_edits SET state=?,attempts=?,next_attempt=?,diagnostic=? '
+                                 "WHERE question_id=? AND version=? AND state='pending'",
+                                 (state, attempts, time.time() + delay, diagnostic, qid, version)).rowcount == 1
+            if changed:
+                self._cleanup_completed(db, qid)
+            return changed
 
     def pending_actions(self, platform):
         with self.connect() as db:
-            rows = db.execute("SELECT q.rowid AS delivery_nonce,q.* FROM questions q JOIN answer_actions a "
+            rows = db.execute("SELECT q.* FROM questions q JOIN answer_actions a "
                               "ON a.question_id=q.id WHERE a.state='pending' AND q.state='answered'").fetchall()
         return [self.unpack(row) for row in rows if json.loads(row['request'])['platform'] == platform]
+
+    def claim_continuation(self, qid):
+        """Claim and persist correlation atomically, BEFORE any admission effect."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            action = db.execute("SELECT a.state FROM answer_actions a JOIN questions q ON q.id=a.question_id "
+                                "WHERE q.id=? AND q.state='answered'", (qid,)).fetchone()
+            if not action or action['state'] != 'pending':
+                return None
+            old = db.execute('SELECT token,state FROM completion_attempts WHERE question_id=?', (qid,)).fetchone()
+            if old and old['state'] != 'pending':
+                return None
+            token = old['token'] if old else uuid.uuid4().hex
+            if old is None:
+                db.execute("INSERT INTO completion_attempts(token,question_id,state) VALUES (?,?,'pending')", (token, qid))
+            db.execute("UPDATE answer_actions SET state='dispatching' WHERE question_id=?", (qid,))
+            return token
 
     def claim_action(self, qid):
         with self.connect() as db:
@@ -443,3 +530,89 @@ class Store:
             raise ValueError('invalid action state')
         with self.connect() as db:
             db.execute("UPDATE answer_actions SET state=? WHERE question_id=? AND state='dispatching'", (state, qid))
+            if state in ('admitted', 'unknown'):
+                db.execute("UPDATE completion_attempts SET state=? WHERE question_id=? AND state='pending'",
+                           (state, qid))
+
+    @staticmethod
+    def _tombstone(row):
+        return dict(row, tombstone=True, compacted=True)
+
+    def prepare_continuation(self, qid):
+        """Persist an opaque correlation token before admitting an answered action."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            action = db.execute("SELECT a.state FROM answer_actions a JOIN questions q ON q.id=a.question_id "
+                                "WHERE q.id=? AND q.state='answered'", (qid,)).fetchone()
+            if not action or action['state'] not in ('pending', 'dispatching'):
+                return None  # Never retroactively correlate legacy admitted actions.
+            old = db.execute('SELECT token,state FROM completion_attempts WHERE question_id=?', (qid,)).fetchone()
+            if old:
+                return old['token'] if old['state'] == 'pending' else None
+            token = uuid.uuid4().hex
+            db.execute("INSERT INTO completion_attempts(token,question_id,state) VALUES (?,?,'pending')", (token, qid))
+            return token
+
+    def bind_turn(self, token, turn_id):
+        """Bind once, with uniqueness in both directions; never guess by question."""
+        if not isinstance(token, str) or not isinstance(turn_id, str) or not turn_id.strip():
+            return False
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM completion_attempts WHERE turn_id=?', (turn_id,)).fetchone():
+                return False
+            return db.execute("UPDATE completion_attempts SET turn_id=? WHERE token=? AND turn_id IS NULL "
+                              "AND state IN ('pending','admitted')", (turn_id, token)).rowcount == 1
+
+    def finish_turn(self, turn_id, *, completed=None, failed=None, interrupted=None):
+        """Only an explicit successful terminal event is authority to remove data."""
+        if completed is not True or failed is not False or interrupted is not False:
+            return False
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            return False
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT question_id FROM completion_attempts WHERE turn_id=? "
+                             "AND state IN ('pending','admitted')", (turn_id,)).fetchone()
+            if not row:
+                return False
+            db.execute("UPDATE completion_attempts SET state='completed',completed=? WHERE turn_id=?", (time.time(), turn_id))
+            self._cleanup_completed(db, row['question_id'])
+            return True
+
+    def _cleanup_completed(self, db, qid):
+        row = db.execute("SELECT q.* FROM questions q JOIN completion_attempts c ON c.question_id=q.id "
+                         "WHERE q.id=? AND q.state='answered' AND c.state='completed' "
+                         "AND ((q.message_id IS NULL AND NOT EXISTS (SELECT 1 FROM feedback_edits f WHERE f.question_id=q.id)) "
+                         "OR EXISTS (SELECT 1 FROM feedback_edits f WHERE f.question_id=q.id "
+                         "AND (f.state IN ('done','deleted') OR (f.state='held' AND f.diagnostic='edit_unsupported'))))", (qid,)).fetchone()
+        if row:
+            self._retire(db, row)
+
+    def _retire(self, db, row):
+        now = time.time()
+        attempt = db.execute('SELECT completed FROM completion_attempts WHERE question_id=?', (row['id'],)).fetchone()
+        completed = attempt['completed'] if attempt and attempt['completed'] is not None else now
+        db.execute('INSERT INTO tombstones VALUES (?,?,?,?,?,?)',
+                   (row['id'], row['idem'], hashlib.sha256(row['request'].encode()).hexdigest(),
+                    row['state'], completed, max(now + 7 * 86400, json.loads(row['request'])['expires_at'])))
+        for table in ('answer_actions', 'feedback_edits'):
+            db.execute('DELETE FROM ' + table + ' WHERE question_id=?', (row['id'],))
+        db.execute('DELETE FROM questions WHERE id=?', (row['id'],))
+
+    def prune(self):
+        """Explicit/opportunistic maintenance only; unresolved receipts are retained."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = time.time()
+            rows = db.execute("SELECT q.* FROM questions q WHERE q.state IN ('expired','cancelled') "
+                              "AND q.created<=? AND json_extract(q.request,'$.expires_at')<=? "
+                              "AND NOT EXISTS (SELECT 1 FROM answer_actions a WHERE a.question_id=q.id) "
+                              "AND NOT EXISTS (SELECT 1 FROM completion_attempts c WHERE c.question_id=q.id) "
+                              "AND NOT EXISTS (SELECT 1 FROM feedback_edits f WHERE f.question_id=q.id "
+                              "AND f.state NOT IN ('done','deleted'))", (now - 7 * 86400, now)).fetchall()
+            for row in rows:
+                self._retire(db, row)
+            db.execute('DELETE FROM completion_attempts WHERE question_id IN '
+                       '(SELECT id FROM tombstones WHERE retain_until<=?)', (now,))
+            db.execute('DELETE FROM tombstones WHERE retain_until<=?', (now,))

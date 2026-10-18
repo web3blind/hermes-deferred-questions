@@ -186,7 +186,7 @@ async def test_one_profile_force_does_not_dispose_other_manager(installed, monke
     target = other_home / 'plugins' / 'deferred-questions'
     target.mkdir(parents=True)
     shutil.copy2(PROJECT / 'plugin.yaml', target / 'plugin.yaml')
-    for name in ('__init__.py', 'store.py', 'runtime.py', 'lifecycle.py'):
+    for name in ('__init__.py', 'store.py', 'runtime.py', 'lifecycle.py', 'notify.py'):
         shutil.copy2(PROJECT / 'hermes_deferred_questions' / name, target / name)
     other_home.joinpath('config.yaml').write_text('plugins:\n  enabled: [deferred-questions]\n')
     secondary = PluginManager(scope_key=str(other_home))

@@ -31,7 +31,7 @@ def installed(tmp_path, monkeypatch):
     # Preserve the legacy directory-loader regression surface (evicted modules).
     # scripts/verify_install.py separately exercises the actual public bridge,
     # stable package and real catalog clone/wheel in a disposable interpreter.
-    for name in ('__init__.py', 'store.py', 'runtime.py', 'lifecycle.py'):
+    for name in ('__init__.py', 'store.py', 'runtime.py', 'lifecycle.py', 'notify.py'):
         shutil.copy2(PROJECT / 'hermes_deferred_questions' / name, target / name)
     home.joinpath('config.yaml').write_text('plugins:\n  enabled: [deferred-questions]\n  entries:\n    deferred-questions:\n      settings:\n        enable_tool: true\n')
     from hermes_cli.plugins import PluginManager

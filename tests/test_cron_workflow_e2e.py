@@ -38,7 +38,10 @@ def stage_producer(home, tmp_path, name, payload):
         f'p = subprocess.run([sys.executable, "-m", "hermes_cli.main", '
         f'"deferred-questions", "request", "--json-file", {str(data)!r}], '
         'capture_output=True, text=True, timeout=45)\n'
-        'if p.returncode: sys.stderr.write(p.stderr + p.stdout)\n'
+        'if p.returncode:\n'
+        '    sys.stderr.write(p.stderr + p.stdout)\n'
+        '    d = subprocess.run([sys.executable, "-c", "import os,hermes_cli; from hermes_constants import get_hermes_home; print(hermes_cli.__file__, get_hermes_home()); from hermes_cli.plugins import PluginManager; m=PluginManager(); m.discover_and_load(); print([(k,v.enabled,v.error) for k,v in m._plugins.items() if k==\'deferred-questions\'])"], capture_output=True, text=True)\n'
+        '    sys.stderr.write(d.stdout + d.stderr)\n'
         'raise SystemExit(p.returncode)\n')
     return producer
 
@@ -222,8 +225,9 @@ async def test_script_question_answer_real_agent_adaptive_effect(installed, tmp_
         await rt.dispatch_once('telegram')
         await asyncio.sleep(0)
         assert send.await_count == 1 and len(seen) == 1
-        assert rt.store.feedback(row['id'])['state'] == 'done'
-        assert rt.store.get(row['id'])['answer']['value'] == row['request']['options'][option - 1]
+        assert rt.store.feedback(row['id']) is None
+        assert rt.store.get(row['id'])['compacted'] is True
+        assert 'answer' not in rt.store.get(row['id'])
         jobs = [j for j in list_jobs(include_disabled=True) if j['id'] != initial_job]
         if schedule is None:
             assert len(rt.store.list()) == 1
@@ -247,7 +251,7 @@ async def test_script_question_answer_real_agent_adaptive_effect(installed, tmp_
             await rt.dispatch_once('telegram')
             second = rt.store.get(second['id'])
             assert second['state'] == 'sent' and second['message_id'] == '43'
-            assert rt.store.get(row['id'])['message_id'] == '42'
+            assert rt.store.get(row['id'])['compacted'] is True
             assert send.await_count == 2
             outgoing = send.call_args.kwargs
             assert outgoing['chat_id'] == '123' and outgoing['message_thread_id'] == 7

@@ -18,7 +18,7 @@ def ep(tmp_path, monkeypatch):
     import shutil
     package = tmp_path / 'hermes_deferred_questions'
     package.mkdir()
-    for name in ('__init__.py', 'runtime.py', 'store.py', 'lifecycle.py'):
+    for name in ('__init__.py', 'runtime.py', 'store.py', 'lifecycle.py', 'notify.py'):
         if (PROJECT / 'hermes_deferred_questions' / name).exists():
             shutil.copy2(PROJECT / 'hermes_deferred_questions' / name, package / name)
     metadata = tmp_path / 'hermes_deferred_questions-0.1.1.dist-info'

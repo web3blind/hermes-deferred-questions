@@ -121,10 +121,12 @@ async def test_connected_notready_cli_and_unload(installed, capsys):
     cli(manager, 'list')
     assert snapshot(home) == first
     adapter._running = False
+    rt._heartbeat()  # Snapshot on an event, not a periodic idle heartbeat.
     later = await wait_snapshot(home, lambda s: s['reason'] == 'not_connected')
     assert later['timestamp'] >= first['timestamp']
     assert later['bound'] and later['worker_alive'] and not later['adapter_is_connected']
     adapter._running = True
+    rt._heartbeat()
     await wait_snapshot(home, lambda s: s['reason'] is None)
     manager.unload()
     unloaded = snapshot(home)
@@ -218,13 +220,19 @@ async def test_write_failure_does_not_change_delivery(installed, monkeypatch, fa
     client = native()
     row = rt.store.create(request(), rt.platforms)
     import hermes_plugins.deferred_questions.runtime as implementation
-    def fail(*args, **kwargs):
-        raise OSError('PRIVATE_FILESYSTEM_EXCEPTION')
     target = implementation.tempfile if failure == 'mkstemp' else implementation.os
+    original = getattr(target, failure)
+    def fail(*args, **kwargs):
+        # Inject a diagnostics-only failure, not failure of required IPC state.
+        heartbeat = (str(args[1]).endswith('telegram-runtime.json') if failure == 'replace'
+                     else kwargs.get('prefix', '').startswith('.telegram-runtime-'))
+        if heartbeat:
+            raise OSError('PRIVATE_FILESYSTEM_EXCEPTION')
+        return original(*args, **kwargs)
     monkeypatch.setattr(target, failure, fail)
     wire(manager, adapter, client)
     async def delivered():
-        while rt.store.get(row['id'])['state'] in ('queued', 'sending'):
+        while (await asyncio.to_thread(rt.store.get, row['id']))['state'] in ('queued', 'sending'):
             await asyncio.sleep(.01)
     await asyncio.wait_for(delivered(), 4)
     manager.unload()

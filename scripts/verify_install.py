@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = Path(os.environ['HERMES_CORE_ROOT']).resolve()
@@ -103,7 +104,8 @@ repo = f'https://127.0.0.1:{server.server_port}/plugin.git'
 # JSON is YAML-compatible; stays outside the pinned source tree.
 source_entry, = load_catalog(ROOT / 'catalog')
 entry_data = source_entry.to_dict()
-entry_data.update(repo=repo, sha=sha)
+entry_data.update(repo=repo, sha=sha,
+                  version=tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"])
 (catalog_dir / 'deferred-questions.yaml').write_text(json.dumps(entry_data))
 entry, = load_catalog(catalog_dir)
 try:
@@ -189,7 +191,7 @@ for key in tuple(sys.modules):
 ep, = [e for e in importlib.metadata.entry_points(group='hermes_agent.plugins') if e.name == name]
 installed = ep.load()
 assert Path(installed.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-for filename in ('__init__.py', 'runtime.py', 'store.py', 'lifecycle.py', 'plugin.yaml'):
+for filename in ('__init__.py', 'runtime.py', 'store.py', 'lifecycle.py', 'notify.py', 'plugin.yaml'):
     assert Path(installed.__file__).parent.joinpath(filename).read_bytes() == ROOT.joinpath('hermes_deferred_questions', filename).read_bytes()
 assert asyncio.run(exercise('entrypoint')) is installed
 print(json.dumps(dict(result='passed', sha=sha, catalog_clone=True,

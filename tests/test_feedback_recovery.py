@@ -155,7 +155,12 @@ async def test_slow_feedback_does_not_stall_worker_continuation(installed):
         row = rt.store.create(request(idempotency_key='second', continue_agent=True), rt.platforms)
         rt.store.claim(row['id']); rt.store.receipt(row['id'], '43')
         assert rt.store.answer(row['id'], '1', row['request'], authorized=True) == 'answered'
+        rt.changed()  # A direct Store producer must signal the event-driven runtime.
         await asyncio.wait_for(ready.wait(), 2)
+        async def admitted():
+            while (await asyncio.to_thread(rt.store.get, row['id']))['continuation_state'] != 'admitted':
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(admitted(), 2)
         assert rt.store.get(row['id'])['continuation_state'] == 'admitted'
     finally:
         release.set(); rt.live = False; task.cancel()

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- Replace the idle database polling loop with profile-local wake notices and
+  once-on-bind recovery. No per-question retry or expiry timers.
+- Persist exact continuation correlation before admission and consume explicit
+  technical turn-completion receipts without inspecting business outcomes.
+- Remove completed payloads while retaining bounded text-free idempotency receipts;
+  preserve unknown/interrupted/legacy work conservatively.
+- Preserve monotonic VK send nonces across deletion and additive migration.
+- Keep acknowledged sends and admission receipts through store contention and
+  lifecycle cancellation without replaying transport or model effects.
+- Document cold-upgrade requirements, event-only diagnostics and delivery limits.
+
 ## 0.2.5
 
 - Protect every Store connection with a persistent nonblocking inter-process lock.

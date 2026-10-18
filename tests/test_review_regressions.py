@@ -36,8 +36,16 @@ async def test_forum_real_decode_text_and_old_button_after_restart(installed, mo
     adapter = telegram()
     bot = Bot('123456:ISOLATED-TEST-TOKEN')
     app = Application.builder().bot(bot).build()
+    initial_scan = asyncio.Event()
+    original_queued = rt.store.queued
+    def queued(platform):
+        result = original_queued(platform)
+        initial_scan.set()
+        return result
+    monkeypatch.setattr(rt.store, 'queued', queued)
     rt.wire('telegram', app, adapter)
-    await asyncio.sleep(0)  # Let the supervised worker observe an empty queue.
+    await asyncio.wait_for(initial_scan.wait(), 1)
+    await asyncio.gather(*rt.feedback_workers.values())  # Truly idle before manual dispatch.
     text_row = rt.store.create(request(chat_id='-123', chat_type='forum', thread_id='7'), rt.platforms)
     button_row = rt.store.create(request(chat_id='-123', chat_type='forum', thread_id='7',
                                          idempotency_key='button'), rt.platforms)
@@ -127,7 +135,9 @@ async def test_local_restrictions_override_real_runner_grant(installed, monkeypa
         decoded = NS(chat=NS(id=-123, type='supergroup', is_forum=False), from_user=NS(id=456, is_bot=False),
                      message_thread_id=None, is_topic_message=False)
     assert adapter._is_sender_authorized('456', chat_type, chat_id, thread_id=thread_id) is True
-    assert adapter._is_user_authorized_from_message(decoded) is (chat_type == 'dm' and behavior != 'ignore')
+    # Native intake rules differ between supported SDK releases; the plugin
+    # must apply the more restrictive local policy regardless of that grant.
+    assert rt.authorized(adapter, source) is False
     row = rt.store.create(request(chat_id=chat_id, chat_type=chat_type, thread_id=thread_id), rt.platforms)
     rt.adapters['telegram'] = (NS(bot=NS(send_message=AsyncMock())), adapter)
     await rt.dispatch_once('telegram')
