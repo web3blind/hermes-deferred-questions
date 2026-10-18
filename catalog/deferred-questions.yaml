@@ -2,18 +2,18 @@
 # Pins the tested plugin-source commit, not this later metadata-only commit.
 name: deferred-questions
 repo: https://github.com/web3blind/hermes-deferred-questions
-sha: 3998fa790bc3ea152d8d29f8dad8c4bc38fa299c
+sha: eb54ec9efc79539251603d4777cd084fb9d8587e
 description: Durable non-blocking questions with exact answer binding and gateway continuation.
 maintainer: web3blind
 tier: community
 category: automation
 requires_hermes: ">=0.21.6"
 platforms: [linux, macos]
-version: "0.2.5"
+version: "0.3.0"
 docs_url: https://github.com/web3blind/hermes-deferred-questions#readme
 readme: true
 capabilities:
   provides_tools: [deferred_questions]
-  provides_hooks: [pre_gateway_dispatch]
+  provides_hooks: [pre_gateway_dispatch, pre_llm_call, on_session_end]
   provides_middleware: []
   requires_env: []

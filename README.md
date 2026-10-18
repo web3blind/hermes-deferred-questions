@@ -97,7 +97,7 @@ Older versions and direct third-party SQLite writers do not honor the store lock
 Do not move the database without its recovery metadata; paths are profile-bound.
 The persistent `store.lock` must not be removed while any process is running.
 
-The bundled catalog example pins the published 0.2.5 source commit. Catalog
+The bundled catalog example pins the published 0.3.0 source commit. Catalog
 admission still requires an upstream maintainer review.
 
 ## Install
